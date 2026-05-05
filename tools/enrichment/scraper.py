@@ -273,28 +273,24 @@ def _enqueue_followups(
     org_id: int,
     final_url: str,
 ) -> None:
-    try:
-        from workers.tool_queue import get_tool_queue
-        tq = get_tool_queue()
-    except Exception:
-        tq = None
-    if not tq:
-        return
+    from workers import kanban
+    from infra.nocodb_client import NocodbClient
+    db = NocodbClient()
 
     if chunk_ids:
         try:
-            tq.submit(
+            kanban.submit(
+                db,
                 "extract_relationships",
                 {"chunk_ids": chunk_ids, "org_id": org_id, "scrape_target_id": target_id, "url": final_url},
-                source="scrape_page",
-                priority=5,
-                org_id=org_id,
+                created_by="scrape_page",
             )
         except Exception:
             _log.warning("relationships enqueue failed  target_id=%d", target_id, exc_info=True)
 
     try:
-        tq.submit(
+        kanban.submit(
+            db,
             "summarise_page",
             {
                 "url": final_url,
@@ -303,9 +299,7 @@ def _enqueue_followups(
                 "source": "scrape_page",
                 "scrape_target_id": target_id,
             },
-            source="scrape_page",
-            priority=4,
-            org_id=org_id,
+            created_by="scrape_page",
         )
     except Exception:
         _log.warning("summarise enqueue failed  target_id=%d", target_id, exc_info=True)

@@ -2,9 +2,8 @@ import json
 import logging
 import time
 from typing import Iterator
-import requests
 from dataclasses import dataclass
-from infra.config import get_model_url
+from shared.model_client import build_model_client
 from infra.rag import retrieve
 from infra.memory import remember
 from infra.nocodb_client import NocodbClient
@@ -34,16 +33,6 @@ class Agent:
             raise ValueError(f"Agent {agent_name} not found on org {org_id}")
         _log.info("agent loaded  name=%s org=%d model=%s", agent_name, org_id, self.config.get("model"))
 
-    def _get_model_url(self) -> str:
-        model_key = self.config["model"].lower()
-        url = get_model_url(model_key)
-        if not url:
-            raise ValueError(
-                f"Model '{model_key}' not found in catalog — "
-                f"set MODEL_{model_key.upper()}_URL in the environment"
-            )
-        return url
-
     def _build_prompt(self, task: str, context: str) -> list[dict]:
         persona = self.config.get("persona", "")
         template = self.config.get("system_prompt_template", "")
@@ -68,8 +57,7 @@ class Agent:
         ]
 
     def _call_model(self, messages: list[dict]) -> dict:
-        url = self._get_model_url()
-
+        model_key = self.config["model"].lower()
         # User-agents run in Huey workers — pause this call while a chat
         # turn is streaming. No-op when the chat priority context is set.
         try:
@@ -77,45 +65,35 @@ class Agent:
             _block_while_chat_active("user_agent._call_model")
         except Exception:
             pass
-
-        response = requests.post(
-            f"{url}/v1/chat/completions",
-            json={
-                "model": self.config["model"],
-                "messages": messages,
-                "temperature": self.config.get("temperature", 0.7),
-                "max_tokens": self.config.get("max_tokens", 1000)
-            },
-            timeout=300
+        mc = build_model_client()
+        result = mc.complete_sync(
+            messages=messages,
+            model=f"local:{model_key}",
+            temperature=self.config.get("temperature", 0.7),
+            max_tokens=self.config.get("max_tokens", 1000),
         )
-        response.raise_for_status()
-        return response.json()
+        if result.error:
+            raise RuntimeError(result.error)
+        return {
+            "choices": [{"message": {"content": result.text}}],
+            "usage": {"prompt_tokens": result.tokens_in, "completion_tokens": result.tokens_out},
+            "model": result.model_used,
+        }
 
     def _call_model_streaming(
         self,
         messages: list[dict],
         temperature: float | None = None,
         max_tokens: int | None = None,
-        url: str | None = None,
         model: str | None = None,
     ) -> Iterator[dict]:
         # never raises — errors surface as {"type": "error"} terminal events
-        url = url or self._get_model_url()
-        model = model or self.config["model"]
+        model_key = (model or self.config["model"]).lower()
         temperature = temperature if temperature is not None else self.config.get("temperature", 0.7)
         max_tokens = max_tokens if max_tokens is not None else self.config.get("max_tokens", 1000)
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-
         final_usage: dict = {}
-        final_model: str = model
+        final_model: str = model_key
         # Same chat-active gate as _call_model; safe no-op for chat path.
         try:
             from shared.model_pool import _block_while_chat_active
@@ -123,15 +101,15 @@ class Agent:
         except Exception:
             pass
         try:
-            with requests.post(
-                f"{url}/v1/chat/completions",
-                json=payload,
-                stream=True,
-                timeout=(10, 600),
+            mc = build_model_client()
+            with mc.stream_sync(
+                messages=messages,
+                model=f"local:{model_key}",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream_options={"include_usage": True},
             ) as response:
-                response.raise_for_status()
-                response.encoding = "utf-8"
-                for raw_line in response.iter_lines(decode_unicode=True):
+                for raw_line in response.iter_lines():
                     if not raw_line:
                         continue
                     if not raw_line.startswith("data:"):

@@ -125,24 +125,16 @@ def jumpstart_insights(org_id: int | None = None) -> dict:
         return {"status": "skipped", "reason": reason, "org_id": org}
 
     try:
-        from workers.tool_queue import get_tool_queue
-        tq = get_tool_queue()
-    except Exception:
-        _log.warning("insight dispatcher: tool queue unavailable", exc_info=True)
-        return {"status": "no_queue"}
-
-    if not tq:
-        return {"status": "no_queue"}
-
-    try:
-        job_id = tq.submit(
+        from workers import kanban
+        from infra.nocodb_client import NocodbClient
+        task_id = kanban.submit(
+            NocodbClient(),
             "insight_produce",
             {"org_id": org, "trigger": reason},
-            source="insight_dispatcher",
-            org_id=org,
+            created_by="insight_dispatcher",
         )
-        _log.info("insight enqueued  org=%d trigger=%s job=%s", org, reason, job_id)
-        return {"status": "queued", "job_id": job_id, "org_id": org, "trigger": reason}
+        _log.info("insight enqueued  org=%d trigger=%s task_id=%d", org, reason, task_id)
+        return {"status": "queued", "task_id": task_id, "org_id": org, "trigger": reason}
     except Exception as e:
         _log.warning("insight submit failed  org=%d err=%s", org, e, exc_info=True)
         return {"status": "submit_failed", "error": str(e)}

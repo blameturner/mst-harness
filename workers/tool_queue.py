@@ -1549,7 +1549,6 @@ class ToolJobQueue:
                 return
             # Dynamic stale sizing for long fan-out jobs.
             research_agent_dynamic_mult = 8
-            research_planner_dynamic_mult = 4
             try:
                 from infra.config import get_feature
                 # research_agent can run multiple web-search calls (one per query)
@@ -1564,17 +1563,8 @@ class ToolJobQueue:
                     72,
                     max(8, int(ceil(research_required_s / max(1, JOB_QUEUE_STALE_TIMEOUT)))),
                 )
-
-                # research_planner performs one bounded planner LLM call.
-                rp_timeout = int(get_feature("research", "planner_timeout_s", 1800) or 1800)
-                planner_required_s = max(600, rp_timeout + 300)
-                research_planner_dynamic_mult = min(
-                    24,
-                    max(4, int(ceil(planner_required_s / max(1, JOB_QUEUE_STALE_TIMEOUT)))),
-                )
             except Exception:
                 research_agent_dynamic_mult = 8
-                research_planner_dynamic_mult = 4
 
             # Per-type stale-timeout overrides from config — operators can
             # extend a single type's window without code changes.
@@ -1615,26 +1605,11 @@ class ToolJobQueue:
 
                 job_type = row.get("type") or ""
                 _STALE_MULTIPLIERS = {
-                    "graph_extract": 4,               # 20m — LLM inference 7-16min
-                    "research_planner": research_planner_dynamic_mult,
-                    "research_agent": research_agent_dynamic_mult,
-                    # research_review and research_op share research_agent's
-                    # workload profile — both can fire multiple bounded LLM
-                    # calls + web search per job. Without an entry here the
-                    # reaper resets them mid-flight every ~5 minutes and the
-                    # row never reaches "completed".
-                    "research_review": research_agent_dynamic_mult,
-                    "research_op": research_agent_dynamic_mult,
                     # Harvest jobs run a per-URL fetch+extract loop bounded
                     # by policy.timeout_total_s (≤2h). Use the same long
                     # multiplier so the reaper does not reset them mid-walk.
                     "harvest_run": research_agent_dynamic_mult,
                     "harvest_finalise": 4,
-                    "scrape_page": 3,                 # 15m — fetch + chunk + embed
-                    "pathfinder_extract": 3,          # 15m — fetch + link extract
-                    "summarise_page": 3,              # 15m — summariser LLM
-                    "extract_relationships": 4,       # 20m — relationship extraction LLM
-                    "discover_agent_run": 3,          # 15m — Chroma sample + LLM + SearXNG queries
                     "simulation_run": 6,              # 30m — N persona turns + debrief LLM
                 }
                 # Per-type config override wins over the multiplier table.

@@ -71,18 +71,9 @@ class RunResult:
 def call_model(ctx: RunContext, messages: list[dict]) -> tuple[str, dict]:
     """Synchronous model call honoring budgets; returns (text, usage)."""
     agent = ctx.agent
-    from infra.config import get_model_url
+    from shared.model_client import build_model_client
     model_key = (agent.get("model") or "").lower()
-    url = get_model_url(model_key) or ""
-    if not url:
-        raise RuntimeError(f"no URL for model: {model_key}")
 
-    body = {
-        "model": agent.get("model"),
-        "messages": messages,
-        "temperature": agent.get("temperature", 0.4),
-        "max_tokens": agent.get("max_tokens", 1500),
-    }
     t0 = time.time()
     # Pause background user-agent calls while a chat turn is live. Chat path
     # has _user_priority_ctx set and skips immediately.
@@ -91,21 +82,26 @@ def call_model(ctx: RunContext, messages: list[dict]) -> tuple[str, dict]:
         _block_while_chat_active("user_agent_base")
     except Exception:
         pass
-    r = requests.post(f"{url}/v1/chat/completions", json=body, timeout=600)
-    r.raise_for_status()
-    data = r.json()
-    text = data["choices"][0]["message"]["content"]
-    usage = data.get("usage", {}) or {}
-    ctx.tokens_in += int(usage.get("prompt_tokens") or 0)
-    ctx.tokens_out += int(usage.get("completion_tokens") or 0)
+    mc = build_model_client()
+    result = mc.complete_sync(
+        messages=messages,
+        model=f"local:{model_key}",
+        temperature=agent.get("temperature", 0.4),
+        max_tokens=agent.get("max_tokens", 1500),
+    )
+    if result.error:
+        raise RuntimeError(result.error)
+    usage = {"prompt_tokens": result.tokens_in, "completion_tokens": result.tokens_out}
+    ctx.tokens_in += result.tokens_in
+    ctx.tokens_out += result.tokens_out
     ctx.log(
         "llm_call",
-        model=agent.get("model"),
-        tokens_in=usage.get("prompt_tokens"),
-        tokens_out=usage.get("completion_tokens"),
+        model=model_key,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
         ms=int((time.time() - t0) * 1000),
     )
-    return text, usage
+    return result.text, usage
 
 
 # ---------- tool calls ----------

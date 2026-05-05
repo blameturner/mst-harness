@@ -13,37 +13,47 @@ from tools._org import default_org_id, resolve_org_id
 _log = logging.getLogger("graph.maintenance.dispatcher")
 
 
-def _submit(job_type: str, org_id: int | None = None) -> dict:
+def jumpstart_entity_resolution(org_id: int | None = None) -> dict:
     if not is_feature_enabled("graph_maintenance"):
         return {"status": "disabled"}
     try:
         from infra.nocodb_client import NocodbClient
-        from workers.tool_queue import get_tool_queue
-        tq = get_tool_queue()
+        from workers import kanban
+        client = NocodbClient()
+        org = resolve_org_id(org_id or default_org_id(client))
     except Exception:
-        _log.warning("graph maintenance dispatcher: imports failed", exc_info=True)
-        return {"status": "no_queue"}
-    if not tq:
-        return {"status": "no_queue"}
-
-    try:
-        org = resolve_org_id(org_id or default_org_id(NocodbClient()))
-    except Exception:
-        _log.warning("graph maintenance: org resolution failed", exc_info=True)
+        _log.warning("graph_resolve_entities dispatcher: setup failed", exc_info=True)
+        return {"status": "error"}
+    if not org:
         return {"status": "no_org"}
-
     try:
-        jid = tq.submit(job_type, {"org_id": org}, source="graph_maintenance", org_id=org)
-        _log.info("%s enqueued  org=%d job=%s", job_type, org, jid)
-        return {"status": "queued", "job_id": jid, "org_id": org}
+        task_id = kanban.submit(client, "graph_resolve_entities", {"org_id": org},
+                                created_by="graph_maintenance_dispatcher")
+        _log.info("graph_resolve_entities queued  task_id=%d org=%d", task_id, org)
+        return {"status": "queued", "task_id": task_id, "org_id": org}
     except Exception as e:
-        _log.warning("%s submit failed  err=%s", job_type, e, exc_info=True)
+        _log.warning("graph_resolve_entities submit failed  err=%s", e, exc_info=True)
         return {"status": "submit_failed", "error": str(e)}
 
 
-def jumpstart_entity_resolution(org_id: int | None = None) -> dict:
-    return _submit("graph_resolve_entities", org_id)
-
-
 def jumpstart_graph_maintenance(org_id: int | None = None) -> dict:
-    return _submit("graph_maintenance", org_id)
+    if not is_feature_enabled("graph_maintenance"):
+        return {"status": "disabled"}
+    try:
+        from infra.nocodb_client import NocodbClient
+        from workers import kanban
+        client = NocodbClient()
+        org = resolve_org_id(org_id or default_org_id(client))
+    except Exception:
+        _log.warning("graph_maintenance dispatcher: setup failed", exc_info=True)
+        return {"status": "error"}
+    if not org:
+        return {"status": "no_org"}
+    try:
+        row_id = kanban.submit(client, "graph_maintenance", {"org_id": org},
+                               created_by="graph_maintenance_dispatcher")
+        _log.info("graph_maintenance queued  row_id=%d org=%d", row_id, org)
+        return {"status": "queued", "task_id": row_id, "org_id": org}
+    except Exception as e:
+        _log.warning("graph_maintenance submit failed  err=%s", e, exc_info=True)
+        return {"status": "submit_failed", "error": str(e)}

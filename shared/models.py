@@ -6,8 +6,6 @@ import threading
 import time
 from contextlib import contextmanager
 
-import httpx
-
 from infra.config import MODELS, REASONER_ROLE, get_feature, get_function_config, no_think_params
 from shared.model_pool import acquire_model, acquire_role
 
@@ -113,13 +111,6 @@ def _persist_model_usage_event(
     threading.Thread(target=_writer, daemon=True).start()
 
 
-def _http_timeout_s() -> int:
-    raw = get_feature("models", "http_timeout_s", DEFAULT_FAST_TIMEOUT)
-    try:
-        val = int(raw)
-        return val if val > 0 else DEFAULT_FAST_TIMEOUT
-    except Exception:
-        return DEFAULT_FAST_TIMEOUT
 
 # chat-only functions bypass the reasoner guard below
 _CHAT_ONLY_FUNCTIONS = frozenset({"chat", "code"})
@@ -159,84 +150,50 @@ def _raw_model_call(
         label, url, model_id, len(prompt), max_tokens,
     )
     try:
-        params = {
-            "model": model_id,
-            "messages": [{"role": "user", "content": prompt}],
+        from shared.model_client import LlamaCppBackend
+        backend = LlamaCppBackend(url_resolver=lambda _: url)
+        kwargs: dict = {
             "temperature": temperature,
             "max_tokens": max_tokens,
             **no_think_params(model_id),
         }
         if extra_params:
-            params.update(extra_params)
-        r = httpx.post(
-            f"{url}/v1/chat/completions",
-            json=params,
-            timeout=_http_timeout_s(),
+            kwargs.update(extra_params)
+        result = backend.complete_sync(
+            messages=[{"role": "user", "content": prompt}],
+            model=model_id or role,
+            **kwargs,
         )
-        r.raise_for_status()
-        data = r.json()
-        msg = data["choices"][0]["message"]
-        text = (msg.get("content") or "").strip()
-        if not text and msg.get("reasoning_content"):
-            text = msg["reasoning_content"].strip()
-            _log.warning("%s content empty, using reasoning_content as fallback", label)
-        usage = data.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens) or (len(prompt) // 4 + max_tokens))
         elapsed = round(time.time() - started, 2)
+        if result.error:
+            _log.error("%s error: %s", label, result.error)
+            _persist_model_usage_event(
+                function_name=function_name, role=role,
+                model_name=str(model_id or role),
+                prompt_tokens=0, completion_tokens=0,
+                duration_seconds=elapsed, ok=False,
+            )
+            return "", 0
+        tokens = result.tokens_in + result.tokens_out or (len(prompt) // 4 + max_tokens)
         _persist_model_usage_event(
             function_name=function_name,
             role=role,
-            model_name=str(data.get("model") or model_id or role),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            model_name=result.model_used,
+            prompt_tokens=result.tokens_in,
+            completion_tokens=result.tokens_out,
             duration_seconds=elapsed,
             ok=True,
         )
         _log.info("%s ok  tokens=%d %.2fs", label, tokens, elapsed)
-        return text, tokens
-    except httpx.HTTPStatusError as e:
-        _log.error(
-            "%s %d from %s: %s",
-            label, e.response.status_code, url, e.response.text[:300],
-        )
+        return result.text, tokens
+    except Exception as e:
+        elapsed = round(time.time() - started, 2)
+        _log.error("%s failed: %s", label, e)
         _persist_model_usage_event(
-            function_name=function_name,
-            role=role,
+            function_name=function_name, role=role,
             model_name=str(model_id or role),
-            prompt_tokens=0,
-            completion_tokens=0,
-            duration_seconds=round(time.time() - started, 2),
-            ok=False,
-        )
-        return "", 0
-    except httpx.TimeoutException:
-        timeout_s = _http_timeout_s()
-        _log.error(
-            "%s timeout after %ds from %s (prompt_len=%d)",
-            label, timeout_s, url, len(prompt),
-        )
-        _persist_model_usage_event(
-            function_name=function_name,
-            role=role,
-            model_name=str(model_id or role),
-            prompt_tokens=0,
-            completion_tokens=0,
-            duration_seconds=round(time.time() - started, 2),
-            ok=False,
-        )
-        return "", 0
-    except Exception:
-        _log.error("%s call failed from %s", label, url, exc_info=True)
-        _persist_model_usage_event(
-            function_name=function_name,
-            role=role,
-            model_name=str(model_id or role),
-            prompt_tokens=0,
-            completion_tokens=0,
-            duration_seconds=round(time.time() - started, 2),
-            ok=False,
+            prompt_tokens=0, completion_tokens=0,
+            duration_seconds=elapsed, ok=False,
         )
         return "", 0
 

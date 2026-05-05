@@ -567,20 +567,16 @@ def _run_extractor_async(
 def _queue_topic_research(org_id: int, topic_ids: list[int]) -> None:
     if not topic_ids:
         return
-    try:
-        from workers.tool_queue import get_tool_queue
-        tq = get_tool_queue()
-    except Exception:
-        return
-    if not tq:
-        return
+    from workers import kanban
+    from infra.nocodb_client import NocodbClient
+    db = NocodbClient()
     for tid in topic_ids:
         try:
-            tq.submit(
+            kanban.submit(
+                db,
                 "pa_topic_research",
                 {"org_id": int(org_id), "topic_id": int(tid)},
-                source="pa_extractor",
-                org_id=int(org_id),
+                created_by="pa_extractor",
             )
         except Exception:
             _log.debug("pa_topic_research enqueue failed  topic=%s", tid, exc_info=True)

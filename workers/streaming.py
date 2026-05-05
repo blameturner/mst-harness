@@ -4,13 +4,10 @@ import json
 import logging
 from typing import Callable
 
-import requests
-
 _log = logging.getLogger(__name__)
 
 
 def stream_model_response(
-    url: str,
     model: str,
     messages: list[dict],
     temperature: float,
@@ -28,14 +25,8 @@ def stream_model_response(
         # Never let the gate's import or wait-loop crash an actual model call.
         _log.debug("chat-active gate skipped (import/wait failed)", exc_info=True)
 
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
+    from shared.model_client import build_model_client
+    mc = build_model_client()
 
     chunks: list[str] = []
     final_usage: dict = {}
@@ -45,15 +36,14 @@ def stream_model_response(
     first_content_emitted = False
     reasoning_chunks: list[str] = []
 
-    with requests.post(
-        f"{url}/v1/chat/completions",
-        json=payload,
-        stream=True,
-        timeout=(30, 3600),
+    with mc.stream_sync(
+        messages=messages,
+        model=f"local:{model}",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream_options={"include_usage": True},
     ) as response:
-        response.raise_for_status()
-        response.encoding = "utf-8"
-        for raw_line in response.iter_lines(decode_unicode=True):
+        for raw_line in response.iter_lines():
             if not raw_line:
                 continue
             if not raw_line.startswith("data:"):

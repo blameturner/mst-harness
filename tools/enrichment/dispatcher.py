@@ -9,42 +9,22 @@ from infra.config import (
     is_feature_enabled,
 )
 from infra.nocodb_client import NocodbClient
-from tools._org import count_inflight as _count_inflight, default_org_id as _default_org_id
+from tools._org import default_org_id as _default_org_id
 
 _log = logging.getLogger("enrichment.dispatcher")
 
 
-def _background_dispatch_allowed(tq) -> tuple[bool, str]:
-    try:
-        st = tq.status() if tq is not None else {}
-    except Exception:
-        st = {}
-    backoff = st.get("backoff") if isinstance(st, dict) else None
-    if not isinstance(backoff, dict):
-        return True, "unknown"
-    state = str(backoff.get("state") or "")
-    if state == "clear":
-        return True, state
-    return False, state or "waiting"
-
 
 def jumpstart_scraper(org_id: int | None = None) -> dict:
-    """Enqueue one `scrape_page` job for the oldest due scrape_target."""
+    """Insert one `scrape_page` Kanban task for the oldest due scrape_target."""
     if not is_feature_enabled("scraper"):
         return {"status": "disabled"}
 
     from tools.enrichment.scraper import fetch_due_target
-    from workers.tool_queue import get_tool_queue
-
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "no_queue"}
-    allowed, reason = _background_dispatch_allowed(tq)
-    if not allowed:
-        return {"status": "gated", "reason": reason}
+    from workers import kanban
 
     client = NocodbClient()
-    inflight = _count_inflight(client, "scrape_page")
+    inflight = kanban.count_inflight(client, "scrape_page")
     if inflight > 0:
         return {"status": "already_running", "inflight": inflight}
 
@@ -63,17 +43,16 @@ def jumpstart_scraper(org_id: int | None = None) -> dict:
         return {"status": "idle"}
 
     try:
-        job_id = tq.submit(
+        row_id = kanban.submit(
+            client,
             "scrape_page",
             {"target_id": target_id, "org_id": org_id},
-            source="scraper_jumpstart",
-            priority=4,
-            org_id=org_id,
+            created_by="scraper_jumpstart",
         )
     except Exception:
         _log.warning("scraper jumpstart submit failed", exc_info=True)
         return {"status": "submit_failed"}
-    _log.info("scraper jumpstart queued job=%s target_id=%d org_id=%d", job_id, target_id, org_id)
+    _log.info("scraper jumpstart queued row_id=%d target_id=%d org_id=%d", row_id, target_id, org_id)
     return {"status": "kicked", "target_id": target_id, "org_id": org_id}
 
 
@@ -94,17 +73,10 @@ def jumpstart_pathfinder(org_id: int | None = None) -> dict:
     if not get_feature("pathfinder", "enabled", True):
         return {"status": "disabled"}
 
-    from workers.tool_queue import get_tool_queue
-
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "no_queue"}
-    allowed, reason = _background_dispatch_allowed(tq)
-    if not allowed:
-        return {"status": "gated", "reason": reason}
+    from workers import kanban
 
     client = NocodbClient()
-    inflight = _count_inflight(client, "pathfinder_extract")
+    inflight = kanban.count_inflight(client, "pathfinder_extract")
     if inflight > 0:
         return {"status": "already_running", "inflight": inflight}
 
@@ -123,17 +95,16 @@ def jumpstart_pathfinder(org_id: int | None = None) -> dict:
         return {"status": "idle"}
 
     try:
-        job_id = tq.submit(
+        task_id = kanban.submit(
+            client,
             "pathfinder_extract",
             {"suggested_id": suggested_id, "org_id": org_id},
-            source="pathfinder_jumpstart",
-            priority=4,
-            org_id=org_id,
+            created_by="pathfinder_jumpstart",
         )
     except Exception:
         _log.warning("pathfinder jumpstart submit failed", exc_info=True)
         return {"status": "submit_failed"}
-    _log.info("pathfinder jumpstart queued job=%s suggested_id=%d", job_id, suggested_id)
+    _log.info("pathfinder jumpstart queued task_id=%d suggested_id=%d", task_id, suggested_id)
     return {"status": "kicked", "suggested_id": suggested_id, "org_id": org_id}
 
 
@@ -142,17 +113,10 @@ def jumpstart_discover_agent(org_id: int | None = None) -> dict:
     if not get_feature("discover_agent", "enabled", True):
         return {"status": "disabled"}
 
-    from workers.tool_queue import get_tool_queue
-
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "no_queue"}
-    allowed, reason = _background_dispatch_allowed(tq)
-    if not allowed:
-        return {"status": "gated", "reason": reason}
+    from workers import kanban
 
     client = NocodbClient()
-    inflight = _count_inflight(client, "discover_agent_run")
+    inflight = kanban.count_inflight(client, "discover_agent_run")
     if inflight > 0:
         return {"status": "already_running", "inflight": inflight}
 
@@ -164,15 +128,14 @@ def jumpstart_discover_agent(org_id: int | None = None) -> dict:
         return {"status": "no_org_context"}
 
     try:
-        job_id = tq.submit(
+        task_id = kanban.submit(
+            client,
             "discover_agent_run",
             {"org_id": org_id},
-            source="discover_agent_jumpstart",
-            priority=5,
-            org_id=org_id,
+            created_by="discover_agent_jumpstart",
         )
     except Exception:
         _log.warning("discover_agent jumpstart submit failed", exc_info=True)
         return {"status": "submit_failed"}
-    _log.info("discover_agent jumpstart queued job=%s org_id=%d", job_id, org_id)
+    _log.info("discover_agent jumpstart queued task_id=%d org_id=%d", task_id, org_id)
     return {"status": "kicked", "org_id": org_id}

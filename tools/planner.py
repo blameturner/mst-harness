@@ -4,10 +4,9 @@ import logging
 import re
 import time
 
-import httpx
-
 from infra.config import get_function_config, no_think_params
 from tools.contract import ToolPlan
+from shared.model_client import build_model_client
 from shared.model_pool import acquire_role
 
 _log = logging.getLogger("tools.planner")
@@ -48,30 +47,25 @@ async def generate_plan(
 
     t0 = time.time()
     try:
-        with acquire_role(cfg["role"], priority=True) as (tool_url, tool_model_id):
-            if not tool_url:
+        mc = build_model_client()
+        with acquire_role(cfg["role"], priority=True) as (_, tool_model_id):
+            if not tool_model_id:
                 _log.warning("no tool model available — skipping plan")
                 return None
-            _log.info("planner call  model=%s url=%s", tool_model_id, tool_url)
-            # 3600s was leftover and could hang the chat turn on a stalled LLM.
-            # 300s lets a slow local tool-planner model complete while still
-            # being an order of magnitude tighter than the old 1-hour wait.
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                resp = await client.post(
-                    f"{tool_url}/v1/chat/completions",
-                    json={
-                        "model": tool_model_id,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": "\n".join(user_prompt_parts)},
-                        ],
-                        "temperature": cfg.get("temperature", 0.1),
-                        "max_tokens": cfg.get("max_tokens", 200),
-                        **no_think_params(),
-                    },
-                )
-                resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
+            _log.info("planner call  model=%s", tool_model_id)
+            result = await mc.complete(
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": "\n".join(user_prompt_parts)},
+                ],
+                model=f"local:{tool_model_id}",
+                temperature=cfg.get("temperature", 0.1),
+                max_tokens=cfg.get("max_tokens", 200),
+                **no_think_params(),
+            )
+            if result.error:
+                raise RuntimeError(result.error)
+        raw = result.text
         _log.info("planner response  model=%s chars=%d elapsed=%.2fs", tool_model_id, len(raw), time.time() - t0)
     except Exception:
         _log.warning("planner call failed", exc_info=True)

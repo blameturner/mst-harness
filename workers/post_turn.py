@@ -69,22 +69,20 @@ def ingest_output(
 
     if queue_graph_extract and (user_text or output):
         try:
-            from workers.tool_queue import get_tool_queue
-            tq = get_tool_queue()
-            if tq:
-                job_id = tq.submit(
-                    job_type="graph_extract",
-                    payload={
-                        "user_text": user_text,
-                        "assistant_text": output,
-                        "conversation_id": conversation_id,
-                        "org_id": org_id,
-                    },
-                    source=source,
-                    org_id=org_id,
-                    priority=3,
-                )
-                _log.info("%s conv=%s  ingest graph_extract queued  job=%s", source, conversation_id, job_id)
+            from workers import kanban
+            from infra.nocodb_client import NocodbClient
+            task_id = kanban.submit(
+                NocodbClient(),
+                "graph_extract",
+                {
+                    "user_text": user_text,
+                    "assistant_text": output,
+                    "conversation_id": conversation_id,
+                    "org_id": org_id,
+                },
+                created_by=source,
+            )
+            _log.info("%s conv=%s  ingest graph_extract queued  task_id=%d", source, conversation_id, task_id)
         except Exception:
             _log.error("%s conv=%s  ingest graph_extract queue FAILED", source, conversation_id, exc_info=True)
 
@@ -170,25 +168,23 @@ def run_post_turn_work(config: PostTurnConfig) -> None:
             _log.error("%s conv=%s  [2/%d] knowledge embed FAILED", config.source, cid, n, exc_info=True)
 
         try:
-            from workers.tool_queue import get_tool_queue
-            tq = get_tool_queue()
-            if tq:
-                job_id = tq.submit(
-                    job_type="graph_extract",
-                    payload={
-                        "user_text": config.user_message,
-                        "assistant_text": config.output,
-                        "conversation_id": cid,
-                        "org_id": config.org_id,
-                    },
-                    source=config.source,
-                    org_id=config.org_id,
-                    priority=3,
-                )
-                _log.info(
-                    "%s conv=%s  [3/%d] graph extraction queued  job=%s",
-                    config.source, cid, n, job_id,
-                )
+            from workers import kanban
+            from infra.nocodb_client import NocodbClient
+            task_id = kanban.submit(
+                NocodbClient(),
+                "graph_extract",
+                {
+                    "user_text": config.user_message,
+                    "assistant_text": config.output,
+                    "conversation_id": cid,
+                    "org_id": config.org_id,
+                },
+                created_by=config.source,
+            )
+            _log.info(
+                "%s conv=%s  [3/%d] graph extraction queued  task_id=%d",
+                config.source, cid, n, task_id,
+            )
         except Exception:
             _log.error("%s conv=%s  [3/%d] graph extraction queue FAILED", config.source, cid, n, exc_info=True)
 

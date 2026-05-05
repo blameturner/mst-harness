@@ -4,24 +4,20 @@ import logging
 
 from infra.config import is_feature_enabled
 from infra.nocodb_client import NocodbClient
-from tools._org import count_inflight, default_org_id
+from tools._org import default_org_id
 
 _log = logging.getLogger("seed_feedback.dispatcher")
 
 
 def jumpstart_seed_feedback(org_id: int | None = None) -> dict:
-    """Enqueue at most one `seed_feedback` job per tick, gated by inflight count."""
+    """Insert at most one `seed_feedback` Kanban task per tick."""
     if not is_feature_enabled("seed_feedback"):
         return {"status": "disabled"}
 
-    from workers.tool_queue import get_tool_queue
-
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "no_queue"}
+    from workers import kanban
 
     client = NocodbClient()
-    inflight = count_inflight(client, "seed_feedback")
+    inflight = kanban.count_inflight(client, "seed_feedback")
     if inflight > 0:
         return {"status": "already_running", "inflight": inflight}
 
@@ -34,15 +30,14 @@ def jumpstart_seed_feedback(org_id: int | None = None) -> dict:
         return {"status": "no_org_context"}
 
     try:
-        job_id = tq.submit(
+        row_id = kanban.submit(
+            client,
             "seed_feedback",
             {"org_id": org_id},
-            source="seed_feedback_jumpstart",
-            priority=5,
-            org_id=org_id,
+            created_by="seed_feedback_jumpstart",
         )
     except Exception:
         _log.warning("seed_feedback submit failed", exc_info=True)
         return {"status": "submit_failed"}
-    _log.info("seed_feedback queued job=%s org_id=%d", job_id, org_id)
+    _log.info("seed_feedback queued row_id=%d org_id=%d", row_id, org_id)
     return {"status": "kicked", "org_id": org_id}

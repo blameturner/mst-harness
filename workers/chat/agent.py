@@ -584,22 +584,20 @@ class ChatAgent(BaseAgent):
                     _log.error("chat conv=%s  [2/4] knowledge embed FAILED", conversation_id, exc_info=True)
 
                 try:
-                    from workers.tool_queue import get_tool_queue
-                    tq = get_tool_queue()
-                    if tq:
-                        job_id = tq.submit(
-                            job_type="graph_extract",
-                            payload={
-                                "user_text": user_message,
-                                "assistant_text": output,
-                                "conversation_id": conversation_id,
-                                "org_id": self.org_id,
-                            },
-                            source="chat",
-                            org_id=self.org_id,
-                            priority=3,
-                        )
-                        _log.info("chat conv=%s  [3/4] graph extraction queued  job=%s", conversation_id, job_id)
+                    from workers import kanban
+                    from infra.nocodb_client import NocodbClient
+                    task_id = kanban.submit(
+                        NocodbClient(),
+                        "graph_extract",
+                        {
+                            "user_text": user_message,
+                            "assistant_text": output,
+                            "conversation_id": conversation_id,
+                            "org_id": self.org_id,
+                        },
+                        created_by="chat",
+                    )
+                    _log.info("chat conv=%s  [3/4] graph extraction queued  task_id=%d", conversation_id, task_id)
                 except Exception:
                     _log.error("chat conv=%s  [3/4] graph extraction queue FAILED", conversation_id, exc_info=True)
 

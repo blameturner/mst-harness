@@ -196,25 +196,24 @@ def _write_usage_prompt(connection: dict, inspection: dict) -> str:
     }
 
     try:
-        with acquire_role(role, priority=True) as (url, model_id):
-            if not url:
+        from shared.model_client import build_model_client
+        mc = build_model_client()
+        with acquire_role(role, priority=True) as (_, model_id):
+            if not model_id:
                 return _fallback_usage_prompt(connection, inspection)
-            r = requests.post(
-                f"{url}/v1/chat/completions",
-                json={
-                    "model": model_id,
-                    "messages": [
-                        {"role": "system", "content": _USAGE_SYSTEM},
-                        {"role": "user", "content": json.dumps(user_payload)[:12000]},
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 700,
-                    **no_think_params(),
-                },
-                timeout=120,
+            result = mc.complete_sync(
+                messages=[
+                    {"role": "system", "content": _USAGE_SYSTEM},
+                    {"role": "user", "content": json.dumps(user_payload)[:12000]},
+                ],
+                model=f"local:{model_id}",
+                temperature=0.2,
+                max_tokens=700,
+                **no_think_params(),
             )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            if result.error:
+                raise RuntimeError(result.error)
+            return result.text
     except Exception:
         _log.warning("usage prompt model call failed — falling back", exc_info=True)
         return _fallback_usage_prompt(connection, inspection)

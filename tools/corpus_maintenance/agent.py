@@ -98,14 +98,7 @@ def _stale_refresh(
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, stale_days))
     cited = _recent_cited_urls(client, org_id, cite_window_days, cite_scan_limit)
 
-    try:
-        from workers.tool_queue import get_tool_queue
-        tq = get_tool_queue()
-    except Exception:
-        tq = None
-    if not tq:
-        _log.info("stale refresh: tool queue unavailable, skipping")
-        return {"candidates": 0, "enqueued": 0}
+    from workers import kanban
 
     enqueued = 0
     candidates = 0
@@ -125,12 +118,11 @@ def _stale_refresh(
             continue
         candidates += 1
         try:
-            tq.submit(
+            kanban.submit(
+                client,
                 "scrape_page",
                 {"target_id": target_id, "org_id": org_id},
-                source="corpus_maintenance_refresh",
-                priority=5,
-                org_id=org_id,
+                created_by="corpus_maintenance_refresh",
             )
             enqueued += 1
         except Exception:

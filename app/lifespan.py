@@ -33,124 +33,18 @@ async def lifespan(app: FastAPI):
     _log.info("scheduler running")
 
     from workers.tool_queue import HandlerConfig, ToolJobQueue, _set_instance
-    from tools.graph_extract import _handle_graph_extract
-    from tools.research.agent import run_research_agent, review_research_paper
-    from tools.research.research_planner import run_research_planner_job
-    from tools.enrichment.scraper import scrape_page_job
-    from tools.enrichment.summariser import summarise_page_job
-    from tools.enrichment.pathfinder import pathfinder_extract_job
-    from tools.enrichment.discover_agent import discover_agent_job
-    from tools.enrichment.relationships_extractor import extract_relationships_job
-    from tools.digest.agent import daily_digest_job
-    from tools.seed_feedback.agent import seed_feedback_job
-    from tools.corpus_maintenance.agent import corpus_maintenance_job
-    from tools.insight.agent import insight_produce_job
-    try:
-        from tools.graph_maintenance.agent import (
-            graph_maintenance_job,
-            graph_resolve_entities_job,
-        )
-        graph_maintenance_import_error = None
-    except Exception as e:
-        graph_maintenance_import_error = str(e)
-
-        def graph_resolve_entities_job(_payload=None):
-            return {"status": "disabled", "reason": "graph_maintenance_import_failed"}
-
-        def graph_maintenance_job(_payload=None):
-            return {"status": "disabled", "reason": "graph_maintenance_import_failed"}
-
-        _log.error("graph_maintenance import failed; handlers disabled", exc_info=True)
-    from tools.pa.background import pa_topic_research_job
     from tools.simulation.agent import run_simulation_job
     tool_queue = ToolJobQueue()
-    # Priority tiers (lower = picked first):
-    #   3 = graph_extract, research planner + agent
-    #   4 = scrape_page, pathfinder_extract, summarise_page
-    #   5 = discover_agent_run, extract_relationships (background)
-    tool_queue.register("research_planner", HandlerConfig(
-        handler=lambda p: run_research_planner_job(p["plan_id"]),
-        max_workers=1, priority_default=3, source="research_planner",
-    ))
-    tool_queue.register("research_agent", HandlerConfig(
-        handler=lambda p: run_research_agent(p["plan_id"]),
-        max_workers=1, priority_default=3, source="research_agent",
-    ))
-    tool_queue.register("research_review", HandlerConfig(
-        handler=lambda p: review_research_paper(p["plan_id"], p.get("instructions", "")),
-        max_workers=1, priority_default=3, source="research_review",
-    ))
-    from tools.research.operations import run_research_op
-    # Allow two ops in flight (e.g. user fires fact_check + slide_deck) without
-    # one blocking the other.
-    tool_queue.register("research_op", HandlerConfig(
-        handler=run_research_op,
-        max_workers=2, priority_default=3, source="research_op",
-    ))
-
     # Harvest pipeline — generic scraper/pathfinder-driven jobs.
     # Importing the package self-registers all policies in tools.harvest.REGISTRY.
     # max_workers=1 because each harvest already drives a long sequential
     # per-URL LLM loop on a single local CPU model; running 2 concurrently
-    # just thrashes the model pool and starves chat / cron jobs (research,
-    # daily_digest, pa_topic_research) that share the same LLM slot.
+    # just thrashes the model pool and starves chat / cron jobs that share
+    # the same LLM slot.
     from tools.harvest import run_harvest
     tool_queue.register("harvest_run", HandlerConfig(
         handler=lambda p: run_harvest(p["run_id"]),
         max_workers=1, priority_default=4, source="harvest",
-    ))
-    tool_queue.register("summarise_page", HandlerConfig(
-        handler=summarise_page_job,
-        max_workers=1, priority_default=4, source="summariser",
-    ))
-    tool_queue.register("graph_extract", HandlerConfig(
-        handler=_handle_graph_extract, max_workers=1, priority_default=3,
-    ))
-    tool_queue.register("scrape_page", HandlerConfig(
-        handler=scrape_page_job,
-        max_workers=1, priority_default=4, source="scraper",
-    ))
-    tool_queue.register("pathfinder_extract", HandlerConfig(
-        handler=pathfinder_extract_job,
-        max_workers=1, priority_default=4, source="pathfinder",
-    ))
-    tool_queue.register("extract_relationships", HandlerConfig(
-        handler=extract_relationships_job,
-        max_workers=1, priority_default=5, source="relationships",
-    ))
-    tool_queue.register("discover_agent_run", HandlerConfig(
-        handler=discover_agent_job,
-        max_workers=1, priority_default=5, source="discover_agent",
-    ))
-    tool_queue.register("daily_digest", HandlerConfig(
-        handler=daily_digest_job,
-        max_workers=1, priority_default=5, source="daily_digest",
-    ))
-    tool_queue.register("seed_feedback", HandlerConfig(
-        handler=seed_feedback_job,
-        max_workers=1, priority_default=5, source="seed_feedback",
-    ))
-    tool_queue.register("corpus_maintenance", HandlerConfig(
-        handler=corpus_maintenance_job,
-        max_workers=1, priority_default=5, source="corpus_maintenance",
-    ))
-    tool_queue.register("insight_produce", HandlerConfig(
-        handler=insight_produce_job,
-        max_workers=1, priority_default=5, source="insight",
-    ))
-    tool_queue.register("graph_resolve_entities", HandlerConfig(
-        handler=graph_resolve_entities_job,
-        max_workers=1, priority_default=5, source="graph_maintenance",
-    ))
-    tool_queue.register("graph_maintenance", HandlerConfig(
-        handler=graph_maintenance_job,
-        max_workers=1, priority_default=5, source="graph_maintenance",
-    ))
-    if graph_maintenance_import_error:
-        _log.warning("graph_maintenance handlers running in disabled mode: %s", graph_maintenance_import_error)
-    tool_queue.register("pa_topic_research", HandlerConfig(
-        handler=pa_topic_research_job,
-        max_workers=1, priority_default=5, source="pa",
     ))
     tool_queue.register("simulation_run", HandlerConfig(
         handler=run_simulation_job,
@@ -160,6 +54,48 @@ async def lifespan(app: FastAPI):
     app.state.tool_queue = tool_queue
     tool_queue.start()
     _log.info("tool job queue running")
+
+    import asyncio as _asyncio
+    from workers import kanban as _kanban
+    from workers.task_handlers import scrape_page as _scrape_page_handler
+    from workers.task_handlers import corpus_maintenance as _corpus_maintenance_handler
+    from workers.task_handlers import graph_maintenance as _graph_maintenance_handler
+    from workers.task_handlers import seed_feedback as _seed_feedback_handler
+    from workers.task_handlers import research_planner as _research_planner_handler
+    from workers.task_handlers import research_agent as _research_agent_handler
+    from workers.task_handlers import research_review as _research_review_handler
+    from workers.task_handlers import research_op as _research_op_handler
+    from workers.task_handlers import graph_extract as _graph_extract_handler
+    from workers.task_handlers import summarise_page as _summarise_page_handler
+    from workers.task_handlers import extract_relationships as _extract_relationships_handler
+    from workers.task_handlers import discover_agent_run as _discover_agent_handler
+    from workers.task_handlers import insight_produce as _insight_produce_handler
+    from workers.task_handlers import pa_topic_research as _pa_topic_research_handler
+    from workers.task_handlers import daily_digest as _daily_digest_handler
+    from workers.task_handlers import pathfinder_extract as _pathfinder_extract_handler
+    from workers.task_handlers import graph_resolve_entities as _graph_resolve_entities_handler
+    from infra.nocodb_client import NocodbClient as _NocodbClient
+    _kanban.register("scrape_page", _scrape_page_handler.handle, llm_bound=False)
+    _kanban.register("corpus_maintenance", _corpus_maintenance_handler.handle, llm_bound=False)
+    _kanban.register("graph_maintenance", _graph_maintenance_handler.handle, llm_bound=False)
+    _kanban.register("seed_feedback", _seed_feedback_handler.handle, llm_bound=False)
+    _kanban.register("research_planner", _research_planner_handler.handle, llm_bound=True)
+    _kanban.register("research_agent", _research_agent_handler.handle, llm_bound=True)
+    _kanban.register("research_review", _research_review_handler.handle, llm_bound=True)
+    _kanban.register("research_op", _research_op_handler.handle, llm_bound=True)
+    _kanban.register("graph_extract", _graph_extract_handler.handle, llm_bound=True)
+    _kanban.register("summarise_page", _summarise_page_handler.handle, llm_bound=True)
+    _kanban.register("extract_relationships", _extract_relationships_handler.handle, llm_bound=True)
+    _kanban.register("discover_agent_run", _discover_agent_handler.handle, llm_bound=True)
+    _kanban.register("insight_produce", _insight_produce_handler.handle, llm_bound=True)
+    _kanban.register("pa_topic_research", _pa_topic_research_handler.handle, llm_bound=True)
+    _kanban.register("daily_digest", _daily_digest_handler.handle, llm_bound=True)
+    _kanban.register("pathfinder_extract", _pathfinder_extract_handler.handle, llm_bound=False)
+    _kanban.register("graph_resolve_entities", _graph_resolve_entities_handler.handle, llm_bound=True)
+    _kanban_db = _NocodbClient()
+    _kanban_llm_task = _asyncio.create_task(_kanban.run_llm_loop(_kanban_db), name="kanban-llm")
+    _kanban_non_llm_task = _asyncio.create_task(_kanban.run_non_llm_loop(_kanban_db), name="kanban-non-llm")
+    _log.info("kanban loops started")
 
     # Periodic dispatchers. Each one enqueues at most one job per tick and is
     # guarded by an inflight check. The single chat-idle gate in tool_queue
@@ -300,6 +236,11 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         tool_queue.stop()
+        _kanban_llm_task.cancel()
+        _kanban_non_llm_task.cancel()
+        await _asyncio.gather(_kanban_llm_task, _kanban_non_llm_task, return_exceptions=True)
+        from shared.model_client import close_model_client
+        await close_model_client()
         shutdown_huey()
         sched.shutdown(wait=False)
         _log.info("shutdown complete")

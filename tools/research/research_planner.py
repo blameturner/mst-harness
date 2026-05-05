@@ -500,7 +500,6 @@ def create_research_plan(
     insight follow-ups so the UI can hide them until the user opts in.
     """
     from infra.nocodb_client import NocodbClient
-    from workers.tool_queue import get_tool_queue
 
     if not get_feature("research", "planner_enabled", True):
         return {"status": "disabled", "error": "research_planner feature disabled"}
@@ -545,31 +544,21 @@ def create_research_plan(
     if defer_run:
         return {"status": "deferred", "plan_id": plan_id}
 
-    tq = get_tool_queue()
-    if tq:
-        job_id = tq.submit(
-            "research_planner",
-            {"plan_id": plan_id, "org_id": org_id},
-            source="research_api",
-            priority=3,
-            org_id=org_id,
-        )
-        _log.info("Queued research planner job %s for plan_id %d", job_id, plan_id)
-        return {"status": "queued", "plan_id": plan_id, "job_id": job_id}
-
-    _log.error("Tool queue unavailable for research planner plan_id=%d", plan_id)
-    client._patch("research_plans", plan_id, {
-        "status": "failed",
-        "error_message": "tool_queue_unavailable",
-    })
-    return {"status": "failed", "error": "tool_queue_unavailable", "plan_id": plan_id}
+    from workers import kanban
+    task_id = kanban.submit(
+        client,
+        "research_planner",
+        {"plan_id": plan_id, "org_id": org_id},
+        created_by="research_api",
+    )
+    _log.info("Queued research planner task_id=%d plan_id=%d", task_id, plan_id)
+    return {"status": "queued", "plan_id": plan_id, "task_id": task_id}
 
 
 def run_research_planner_job(plan_id: int) -> dict:
     """Planner tool-queue handler: generate queries/schema for an existing row, then queue the agent."""
     from infra.nocodb_client import NocodbClient
-    from workers.tool_queue import get_tool_queue
-    from workers.tool_queue import current_job_id, report_progress
+    from workers.tool_queue import report_progress
 
     if not get_feature("research", "planner_enabled", True):
         return {"status": "disabled", "error": "research_planner feature disabled"}
@@ -614,25 +603,14 @@ def run_research_planner_job(plan_id: int) -> dict:
         client._patch("research_plans", plan_id, {"status": "failed", "error_message": str(e)[:500]})
         return {"status": "failed", "error": str(e)[:200], "plan_id": plan_id}
 
-    tq = get_tool_queue()
-    if not tq:
-        client._patch("research_plans", plan_id, {
-            "status": "failed",
-            "error_message": "tool_queue_unavailable",
-        })
-        return {"status": "failed", "error": "tool_queue_unavailable", "plan_id": plan_id}
-
-    # Queue the agent as a dependent job; planner job now ends after plan save.
-    planner_job_id = current_job_id() or ""
     report_progress("planner phase: queueing research agent", kind="plan", step=5, total=5)
     try:
-        agent_job_id = tq.submit(
+        from workers import kanban
+        agent_task_id = kanban.submit(
+            client,
             "research_agent",
             {"plan_id": plan_id, "org_id": org_id},
-            source="research_planner",
-            priority=3,
-            org_id=org_id,
-            depends_on=planner_job_id,
+            created_by="research_planner",
         )
     except Exception as e:
         client._patch("research_plans", plan_id, {
@@ -640,18 +618,12 @@ def run_research_planner_job(plan_id: int) -> dict:
             "error_message": f"agent_queue_failed: {str(e)[:300]}",
         })
         return {"status": "failed", "error": f"agent_queue_failed: {str(e)[:200]}", "plan_id": plan_id}
-    _log.info(
-        "Queued research agent job %s for plan_id %d (depends_on=%s)",
-        agent_job_id,
-        plan_id,
-        planner_job_id[:12] or "-",
-    )
+    _log.info("Queued research agent task_id=%d plan_id=%d", agent_task_id, plan_id)
     return {
         "status": "queued",
         "plan_id": plan_id,
         "queries": len(queries),
-        "agent_job_id": agent_job_id,
-        "depends_on": planner_job_id or None,
+        "agent_task_id": agent_task_id,
     }
 
 
@@ -659,7 +631,6 @@ def start_research_plan(plan_id: int) -> dict:
     """Invoke a deferred (hidden) research plan: clear the hidden type and
     queue the planner job that will generate queries/schema and queue agent."""
     from infra.nocodb_client import NocodbClient
-    from workers.tool_queue import get_tool_queue
     from tools._org import resolve_org_id
 
     client = NocodbClient()
@@ -679,23 +650,15 @@ def start_research_plan(plan_id: int) -> dict:
     except Exception as e:
         _log.warning("start_research_plan: clear type failed  plan_id=%d  error=%s", plan_id, e)
 
-    tq = get_tool_queue()
-    if not tq:
-        client._patch("research_plans", plan_id, {
-            "status": "failed",
-            "error_message": "tool_queue_unavailable",
-        })
-        return {"status": "failed", "error": "tool_queue_unavailable", "plan_id": plan_id}
-
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        client,
         "research_planner",
         {"plan_id": plan_id, "org_id": org_id},
-        source="research_api",
-        priority=3,
-        org_id=org_id,
+        created_by="research_api",
     )
-    _log.info("Started deferred research plan plan_id=%d job_id=%s", plan_id, job_id)
-    return {"status": "queued", "plan_id": plan_id, "job_id": job_id}
+    _log.info("Started deferred research plan plan_id=%d task_id=%d", plan_id, task_id)
+    return {"status": "queued", "plan_id": plan_id, "task_id": task_id}
 
 
 def get_next_plan() -> dict | None:

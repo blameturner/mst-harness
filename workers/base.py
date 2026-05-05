@@ -88,7 +88,6 @@ class BaseAgent:
     ) -> tuple[list[str], dict, str]:
         from workers.streaming import stream_model_response
         return stream_model_response(
-            url=self.url,
             model=self.model,
             messages=messages,
             temperature=temperature,

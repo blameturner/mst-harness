@@ -99,6 +99,7 @@ SUBSYSTEMS: dict[str, dict] = {
             "graph_maintenance_dispatcher",
         ],
         "trigger_job_type": "graph_maintenance",
+        "kanban_handler": True,
     },
     "entity_resolution": {
         "label": "Entity resolution",
@@ -106,6 +107,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "graph_maintenance",
         "scheduler_job_ids": ["graph_entity_resolution_dispatcher"],
         "trigger_job_type": "graph_resolve_entities",
+        "kanban_handler": True,
     },
     "research": {
         "label": "Research",
@@ -113,6 +115,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "research",
         "scheduler_job_ids": ["research_plan_reaper"],
         "trigger_job_type": "research_op",  # body must include {plan_id, kind, params}
+        "kanban_handler": True,
     },
     "harvest": {
         "label": "Harvest",
@@ -132,6 +135,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "discover_agent",
         "scheduler_job_ids": ["discover_agent_dispatcher"],
         "trigger_job_type": "discover_agent_run",
+        "kanban_handler": True,
     },
     "daily_digest": {
         "label": "Daily digest",
@@ -139,6 +143,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "daily_digest",
         "scheduler_job_ids": ["daily_digest_dispatcher"],
         "trigger_job_type": "daily_digest",
+        "kanban_handler": True,
     },
     "seed_feedback": {
         "label": "Seed feedback",
@@ -146,6 +151,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "seed_feedback",
         "scheduler_job_ids": ["seed_feedback_dispatcher"],
         "trigger_job_type": "seed_feedback",
+        "kanban_handler": True,
     },
     "corpus_maintenance": {
         "label": "Corpus maintenance",
@@ -153,6 +159,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "corpus_maintenance",
         "scheduler_job_ids": ["corpus_maintenance_dispatcher"],
         "trigger_job_type": "corpus_maintenance",
+        "kanban_handler": True,
     },
     "insights": {
         "label": "Insights",
@@ -160,6 +167,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "insights",
         "scheduler_job_ids": ["insight_dispatcher"],
         "trigger_job_type": "insight_produce",
+        "kanban_handler": True,
     },
     "pa": {
         "label": "Personal Assistant",
@@ -167,6 +175,7 @@ SUBSYSTEMS: dict[str, dict] = {
         "feature_section": "pa",
         "scheduler_job_ids": [],
         "trigger_job_type": "pa_topic_research",
+        "kanban_handler": True,
     },
     "simulation": {
         "label": "Simulation Lab",
@@ -501,10 +510,6 @@ def trigger_subsystem(subsystem_id: str, body: TriggerRequest | None = None):
                     f"use the dedicated endpoint instead"),
         )
 
-    tq = get_tool_queue()
-    if tq is None:
-        raise HTTPException(status_code=503, detail="tool_queue_unavailable")
-
     org_id = int(body.org_id or resolve_org_id(0) or 1)
     payload = dict(body.payload or {})
     errors = _validate_trigger_payload(subsystem_id, payload)
@@ -513,6 +518,30 @@ def trigger_subsystem(subsystem_id: str, body: TriggerRequest | None = None):
     if body.bypass_idle:
         payload["force_bypass_idle"] = True
     payload.setdefault("org_id", org_id)
+
+    if meta.get("kanban_handler"):
+        from workers import kanban as _kanban
+        from infra.nocodb_client import NocodbClient as _NocodbClient
+        try:
+            task_id = _kanban.submit(
+                _NocodbClient(), job_type, payload,
+                created_by=f"admin:{subsystem_id}",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"submit failed: {e}")
+        _log.info("admin trigger (kanban)  subsystem=%s  task_id=%d  type=%s",
+                  subsystem_id, task_id, job_type)
+        return {
+            "status": "queued",
+            "subsystem": subsystem_id,
+            "job_type": job_type,
+            "task_id": task_id,
+            "bypass_idle": body.bypass_idle,
+        }
+
+    tq = get_tool_queue()
+    if tq is None:
+        raise HTTPException(status_code=503, detail="tool_queue_unavailable")
 
     try:
         job_id = tq.submit(

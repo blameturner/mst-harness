@@ -226,18 +226,14 @@ def discovery_suggestion_approve(suggested_id: int, org_id: int):
         _log.warning("suggestion approve patch failed  id=%d", suggested_id, exc_info=True)
         return {"status": "failed", "error": "patch_failed"}
 
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "failed", "error": "tool_queue_unavailable"}
-
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        client,
         "pathfinder_extract",
         {"suggested_id": suggested_id, "org_id": org_id},
-        source="discovery_suggestions_api",
-        priority=3,
-        org_id=org_id,
+        created_by="discovery_suggestions_api",
     )
-    return {"status": "queued", "suggested_id": suggested_id, "job_id": job_id, "org_id": org_id}
+    return {"status": "queued", "suggested_id": suggested_id, "task_id": task_id, "org_id": org_id}
 
 
 @router.post("/discovery/suggestions/{suggested_id}/reject")
@@ -404,18 +400,14 @@ def pathfinder_discover(req: PathfinderRequest):
         _log.warning("pathfinder discover insert failed  url=%s", norm_url[:80], exc_info=True)
         return {"status": "failed", "error": "insert_failed"}
 
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "failed", "error": "tool_queue_unavailable"}
-
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        client,
         "pathfinder_extract",
         {"suggested_id": suggested_id, "org_id": req.org_id},
-        source="pathfinder_api",
-        priority=3,
-        org_id=req.org_id,
+        created_by="pathfinder_api",
     )
-    return {"status": "queued", "suggested_id": suggested_id, "job_id": job_id, "url": norm_url}
+    return {"status": "queued", "suggested_id": suggested_id, "task_id": task_id, "url": norm_url}
 
 
 # ── Scraper control ───────────────────────────────────────────────────────────
@@ -429,11 +421,8 @@ def scraper_start(org_id: int | None = None):
 
 @router.post("/scrape-targets/{target_id}/run-now")
 def scrape_target_run_now(target_id: int, org_id: int):
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "failed", "error": "tool_queue_unavailable"}
-
-    row = _get_single_row(NocodbClient(), "scrape_targets", target_id, org_id=org_id)
+    db = NocodbClient()
+    row = _get_single_row(db, "scrape_targets", target_id, org_id=org_id)
     if not row:
         return {"status": "not_found", "target_id": target_id}
 
@@ -441,14 +430,14 @@ def scrape_target_run_now(target_id: int, org_id: int):
     if org_id <= 0:
         return {"status": "failed", "error": "missing_org_id", "target_id": target_id}
 
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        db,
         "scrape_page",
         {"target_id": target_id, "org_id": org_id},
-        source="scrape_target_api",
-        priority=3,
-        org_id=org_id,
+        created_by="scrape_target_api",
     )
-    return {"status": "queued", "target_id": target_id, "job_id": job_id, "org_id": org_id}
+    return {"status": "queued", "target_id": target_id, "task_id": task_id, "org_id": org_id}
 
 
 @router.get("/pathfinder/start")
@@ -584,13 +573,10 @@ def research_op_invoke(plan_id: int, kind: str, body: ResearchOpRequest | None =
     if kind not in ASYNC_OPS:
         raise HTTPException(status_code=400, detail=f"unknown op kind: {kind}")
 
-    tq = get_tool_queue()
-    if not tq:
-        raise HTTPException(status_code=503, detail="tool_queue_unavailable")
-
     org_id = 1
+    db = NocodbClient()
     try:
-        row = NocodbClient()._get("research_plans", params={"where": f"(Id,eq,{plan_id})", "limit": 1})
+        row = db._get("research_plans", params={"where": f"(Id,eq,{plan_id})", "limit": 1})
         plan = row.get("list", [])[0] if row.get("list") else None
         if plan:
             org_id = resolve_org_id(plan.get("org_id"))
@@ -599,14 +585,14 @@ def research_op_invoke(plan_id: int, kind: str, body: ResearchOpRequest | None =
     if org_id <= 0:
         org_id = 1
 
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        db,
         "research_op",
         {"plan_id": plan_id, "kind": kind, "params": params},
-        source=f"research_op_{kind}",
-        priority=3,
-        org_id=org_id,
+        created_by=f"research_op_{kind}",
     )
-    return {"status": "queued", "plan_id": plan_id, "kind": kind, "job_id": job_id}
+    return {"status": "queued", "plan_id": plan_id, "kind": kind, "task_id": task_id}
 
 
 @router.get("/research/{plan_id}/artifacts")
@@ -667,16 +653,12 @@ def research_review(plan_id: int, body: ResearchReviewRequest | None = None):
     affected sections and the new paper replaces the old. Runs async via the
     tool queue so a long review never blocks the request.
     """
-    from fastapi import HTTPException
-    tq = get_tool_queue()
-    if not tq:
-        raise HTTPException(status_code=503, detail="tool_queue_unavailable")
-
     instructions = (body.instructions if body else "") or ""
 
     org_id = 1
+    db = NocodbClient()
     try:
-        row = NocodbClient()._get("research_plans", params={"where": f"(Id,eq,{plan_id})", "limit": 1})
+        row = db._get("research_plans", params={"where": f"(Id,eq,{plan_id})", "limit": 1})
         plan = row.get("list", [])[0] if row.get("list") else None
         if plan:
             org_id = resolve_org_id(plan.get("org_id"))
@@ -685,25 +667,22 @@ def research_review(plan_id: int, body: ResearchReviewRequest | None = None):
     if org_id <= 0:
         org_id = 1
 
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        db,
         "research_review",
         {"plan_id": plan_id, "org_id": org_id, "instructions": instructions},
-        source="research_review",
-        priority=3,
-        org_id=org_id,
+        created_by="research_review",
     )
-    return {"status": "queued", "plan_id": plan_id, "job_id": job_id}
+    return {"status": "queued", "plan_id": plan_id, "task_id": task_id}
 
 
 @router.post("/research/agent/run")
 def research_agent_run(req: ResearchAgentRequest):
-    tq = get_tool_queue()
-    if not tq:
-        return {"status": "failed", "error": "tool_queue_unavailable"}
-
     org_id = 1
+    db = NocodbClient()
     try:
-        row = NocodbClient()._get("research_plans", params={"where": f"(Id,eq,{req.plan_id})", "limit": 1})
+        row = db._get("research_plans", params={"where": f"(Id,eq,{req.plan_id})", "limit": 1})
         plan = row.get("list", [])[0] if row.get("list") else None
         org_id = resolve_org_id((plan or {}).get("org_id"))
     except Exception:
@@ -712,14 +691,14 @@ def research_agent_run(req: ResearchAgentRequest):
     if org_id <= 0:
         org_id = 1
 
-    job_id = tq.submit(
+    from workers import kanban
+    task_id = kanban.submit(
+        db,
         "research_agent",
         {"plan_id": req.plan_id, "org_id": org_id},
-        source="enrichment_api",
-        priority=3,
-        org_id=org_id,
+        created_by="enrichment_api",
     )
-    return {"status": "queued", "job_id": job_id}
+    return {"status": "queued", "task_id": task_id}
 
 
 @router.post("/research/agent/next")
