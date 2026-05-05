@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Awaitable
@@ -24,6 +25,18 @@ MAX_RETRIES = 3
 POLL_INTERVAL = 5.0
 
 TaskHandler = Callable[[dict], Awaitable[dict]]
+
+
+class TaskNotReady(Exception):
+    """Raised by a handler when its prerequisite hasn't completed yet.
+
+    kanban._execute re-queues the task with a not_before delay without
+    consuming a retry slot — the same mechanism as AutonomyBackoff.
+    """
+
+    def __init__(self, reason: str, delay_seconds: int = 60) -> None:
+        super().__init__(reason)
+        self.delay_seconds = delay_seconds
 
 
 @dataclass(frozen=True)
@@ -154,13 +167,22 @@ def _claim_next(db: NocodbClient, task_types: set[str]) -> dict | None:
 
     row = rows[0]
     row_id = row["Id"]
-    db._patch(TASK_TABLE, row_id, {"status": "claimed", "started_at": now})
+    worker_id = uuid.uuid4().hex
+    db._patch(TASK_TABLE, row_id, {"status": "claimed", "started_at": now, "claimed_by": worker_id})
     verify = db._get(TASK_TABLE, params={"where": f"(Id,eq,{row_id})", "limit": 1}).get("list", [])
-    if not verify or verify[0].get("status") != "claimed":
+    if not verify:
+        return None
+    claimed = verify[0]
+    remote_claimed_by = claimed.get("claimed_by")
+    if remote_claimed_by is not None:
+        # Column exists: use it as the authoritative race-winner check
+        if remote_claimed_by != worker_id:
+            _log.debug("kanban claim race lost  row_id=%s  by=%s", row_id, remote_claimed_by)
+            return None
+    elif claimed.get("status") != "claimed":
+        # Column absent (graceful degradation): fall back to status check
         _log.debug("kanban claim race lost  row_id=%s", row_id)
         return None
-
-    claimed = verify[0]
     _log.info("kanban claimed  row_id=%s  task_type=%s", row_id, claimed.get("task_type"))
     return claimed
 
@@ -187,6 +209,12 @@ async def _execute(db: NocodbClient, task: dict) -> None:
         await asyncio.to_thread(_mark_done, db, row_id, output)
         _log.info("kanban done  row_id=%s  task_type=%s", row_id, task_type)
     except Exception as exc:
+        if isinstance(exc, TaskNotReady):
+            not_before = (datetime.now(timezone.utc) + timedelta(seconds=exc.delay_seconds)).isoformat()
+            await asyncio.to_thread(_requeue_with_delay, db, row_id, not_before, str(exc))
+            _log.info("kanban task-not-ready  row_id=%s  delay=%ds  reason=%s",
+                      row_id, exc.delay_seconds, exc)
+            return
         if AutonomyBackoff is not None and isinstance(exc, AutonomyBackoff):
             not_before = (datetime.now(timezone.utc) + timedelta(seconds=exc.delay_seconds)).isoformat()
             await asyncio.to_thread(_requeue_with_delay, db, row_id, not_before, str(exc))
@@ -234,8 +262,9 @@ def _mark_blocked(db: NocodbClient, row_id: int, reason: str) -> None:
 
 
 def _requeue_with_delay(db: NocodbClient, row_id: int, not_before: str, reason: str) -> None:
-    db._patch(TASK_TABLE, row_id, {"status": "ready", "not_before": not_before})
-    _log.info("kanban autonomy-requeue  row_id=%s  not_before=%s  reason=%s", row_id, not_before, reason)
+    # Reset retry_count so a future genuine error gets a full retry budget.
+    db._patch(TASK_TABLE, row_id, {"status": "ready", "not_before": not_before, "retry_count": 0})
+    _log.info("kanban requeue  row_id=%s  not_before=%s  reason=%s", row_id, not_before, reason)
 
 
 def _iso_now() -> str:
@@ -259,6 +288,7 @@ def submit(
     created_by: str = "",
     agent: str = "",
     model: str = "",
+    parent_task_id: int | None = None,
 ) -> int:
     """Insert a task into task_list. Returns the NocoDB row Id."""
     row: dict = {
@@ -272,21 +302,21 @@ def submit(
         row["agent"] = agent
     if model:
         row["model"] = model
+    if parent_task_id:
+        row["parent_task_id"] = parent_task_id
     result = db._post(TASK_TABLE, row)
     _log.info("kanban submit  task_type=%s  status=%s  row_id=%s", task_type, status, result.get("Id"))
     return int(result.get("Id") or 0)
 
 
 def count_inflight(db: NocodbClient, task_type: str) -> int:
-    """Count claimed+running rows of a task_type in task_list."""
-    total = 0
-    for status in ("claimed", "running"):
-        try:
-            data = db._get(TASK_TABLE, params={
-                "where": f"(task_type,eq,{task_type})~and(status,eq,{status})",
-                "limit": 50,
-            })
-            total += len(data.get("list", []))
-        except Exception:
-            pass
-    return total
+    """Count claimed rows of a task_type in task_list."""
+    try:
+        data = db._get(TASK_TABLE, params={
+            "where": f"(task_type,eq,{task_type})~and(status,eq,claimed)",
+            "limit": 50,
+        })
+        return len(data.get("list", []))
+    except Exception:
+        _log.warning("kanban count_inflight failed  task_type=%s", task_type, exc_info=True)
+        return 0

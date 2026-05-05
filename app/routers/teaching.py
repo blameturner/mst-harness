@@ -288,6 +288,8 @@ def get_learner_concepts(org_id: int, topic: str):
             "mastery": r.get("mastery"),
             "last_seen": r.get("last_seen"),
             "session_count": r.get("session_count"),
+            "misconceptions": r.get("misconceptions"),
+            "preferred_style": r.get("preferred_style"),
         }
         for r in rows
     ]

@@ -92,6 +92,11 @@ def _run(task: dict, payload: dict) -> dict:
         if len(content) > _MAX_FILE_CHARS:
             _log.warning("revise: truncating file for prompt  path=%s  chars=%d", p, len(content))
         file_snippets.append(f"### {p}\n```\n{content[:_MAX_FILE_CHARS]}\n```")
+    if not file_snippets:
+        return {
+            "status": "failed",
+            "error": f"none of the changed_paths exist in project files: {target_paths}",
+        }
     files_block = "\n\n".join(file_snippets)
 
     prompt = _REVISE_PROMPT.format(feedback=human_feedback, files=files_block)

@@ -11,6 +11,7 @@ import json
 import logging
 
 from workers.kanban import TaskHandler
+from workers.project_autonomy import check_autonomy
 from tools.project import resolve_agent_model
 
 _log = logging.getLogger("project_index.handler")
@@ -34,6 +35,7 @@ def _run(task: dict, payload: dict) -> dict:
     from tools.project.knowledge import write_repo_summary, write_repo_index
 
     db = NocodbClient()
+    check_autonomy(db, task)
     model_role = resolve_agent_model(task, "project_po")
 
     try:

@@ -155,7 +155,10 @@ def _check_consecutive_failures(db: NocodbClient, project_id: int) -> None:
     for row in rows:
         if row.get("status") == "failed":
             streak += 1
-        else:
+        elif row.get("status") == "done":
+            # A successful task genuinely resets the streak.
+            # 'blocked' (guardrail event) is skipped — it neither counts as a
+            # failure nor resets the streak.
             break
 
     if streak >= 6:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
-from workers.kanban import TaskHandler
+from workers.kanban import TaskHandler, TaskNotReady
 
 _log = logging.getLogger("teaching.check")
 
@@ -48,6 +48,11 @@ def _run(task: dict, payload: dict) -> dict:
         except _json.JSONDecodeError as exc:
             return {"status": "failed", "error": f"parent output_payload is not valid JSON: {exc}"}
 
+        if not parent_output:
+            raise TaskNotReady(
+                f"parent task {parent_task_id} has no output_payload yet — re-queuing", delay_seconds=60
+            )
+
         lesson_id = int(parent_output.get("lesson_id") or 0)
         if not lesson_id:
             return {"status": "failed", "error": "parent output_payload missing lesson_id"}
@@ -78,6 +83,8 @@ def _run(task: dict, payload: dict) -> dict:
             "checks_path": checks_path,
         }
 
+    except TaskNotReady:
+        raise
     except Exception as exc:
         _log.error("teaching_check uncaught  parent_task_id=%d err=%s", parent_task_id, exc, exc_info=True)
         return {"status": "failed", "error": str(exc)[:400], "parent_task_id": parent_task_id}

@@ -22,27 +22,45 @@ def get_learner_concepts(db, org_id: int, topic: str) -> list[dict]:
     )
 
 
-def upsert_learner_concept(db, org_id: int, topic: str, concept: str, mastery: str = "exposed") -> None:
+def upsert_learner_concept(
+    db,
+    org_id: int,
+    topic: str,
+    concept: str,
+    mastery: str = "exposed",
+    misconceptions: str | None = None,
+    preferred_style: str | None = None,
+) -> None:
     now = datetime.now(timezone.utc).isoformat()
     existing = db._safe_get(
         "learner_concepts",
         f"(org_id,eq,{org_id})~and(topic,eq,{topic})~and(concept,eq,{concept})",
     )
     if existing:
-        db._patch("learner_concepts", int(existing["Id"]), {
+        patch: dict = {
             "mastery": mastery,
             "last_seen": now,
             "session_count": int(existing.get("session_count") or 0) + 1,
-        })
+        }
+        if misconceptions is not None:
+            patch["misconceptions"] = misconceptions
+        if preferred_style is not None:
+            patch["preferred_style"] = preferred_style
+        db._patch("learner_concepts", int(existing["Id"]), patch)
     else:
-        db._safe_post("learner_concepts", {
+        row: dict = {
             "org_id": org_id,
             "topic": topic,
             "concept": concept,
             "mastery": mastery,
             "last_seen": now,
             "session_count": 1,
-        })
+        }
+        if misconceptions is not None:
+            row["misconceptions"] = misconceptions
+        if preferred_style is not None:
+            row["preferred_style"] = preferred_style
+        db._safe_post("learner_concepts", row)
 
 
 def get_curriculum(db, curriculum_id: int) -> dict | None:
@@ -69,7 +87,9 @@ def upsert_curriculum(
     if curriculum_id:
         row = db._safe_get("learner_curricula", f"(Id,eq,{curriculum_id})")
         if row:
-            return db._patch("learner_curricula", int(row["Id"]), payload) or row
+            patched = db._patch("learner_curricula", int(row["Id"]), payload)
+            # Some NocoDB versions return None/empty on a successful PATCH.
+            return patched or db._safe_get("learner_curricula", f"(Id,eq,{curriculum_id})") or row
     payload["current_module_index"] = 0
     return db._safe_post("learner_curricula", payload) or {}
 

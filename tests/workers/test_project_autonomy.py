@@ -139,3 +139,27 @@ def test_backoff_disabled_skips_failure_check():
     with patch("workers.project_autonomy._get_setting", side_effect=_no_backoff):
         check_autonomy(db, _task())
     assert db._get.call_count == 3
+
+
+def test_blocked_between_failures_does_not_reset_streak():
+    """A 'blocked' row (autonomy guardrail event) must not reset the failure
+    streak — only 'done' signals the project is actually working.
+    4 failures with 1 block interspersed equals a depth-4 streak, which must
+    trigger the 30-min backoff (streak>=4), not the lighter 5-min one."""
+    rows = [{"status": "failed"}, {"status": "failed"}, {"status": "blocked"},
+            {"status": "failed"}, {"status": "failed"}]
+    db = _db([], [], [], rows)
+    with patch("workers.project_autonomy._get_setting", side_effect=_no_setting):
+        with pytest.raises(AutonomyBackoff) as exc_info:
+            check_autonomy(db, _task())
+    assert exc_info.value.delay_seconds == 1800, (
+        "4 real failures (block skipped) must trigger 30-min backoff, not 5-min"
+    )
+
+
+def test_done_between_failures_resets_streak():
+    """A 'done' row genuinely resets the streak — the project was working."""
+    rows = [{"status": "failed"}, {"status": "done"}, {"status": "failed"}, {"status": "failed"}]
+    db = _db([], [], [], rows)
+    with patch("workers.project_autonomy._get_setting", side_effect=_no_setting):
+        check_autonomy(db, _task())  # only 1 consecutive failure after the done → no backoff

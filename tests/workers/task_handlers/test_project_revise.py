@@ -116,6 +116,27 @@ def test_skips_to_review_at_max_revisions():
     assert "project_human_review" not in submitted
 
 
+def test_fails_when_all_changed_paths_missing_from_project_files():
+    """If the project has no matching files for the changed_paths, the handler
+    must fail before calling the model — not silently advance revision_count."""
+    from workers.task_handlers import project_revise as mod
+
+    db = MagicMock()
+    db.list_project_files.return_value = []  # no files at all
+
+    mc = MagicMock()
+
+    with patch.object(mod, "check_autonomy"), \
+         patch.object(mod, "NocodbClient", return_value=db), \
+         patch.object(mod, "resolve_model_entry", return_value={"model_id": "m1"}), \
+         patch.object(mod, "resolve_agent_model", return_value="t2_coder"), \
+         patch.object(mod, "build_model_client", return_value=mc):
+        result = asyncio.run(mod.handle(_make_task()))
+
+    assert result["status"] == "failed"
+    mc.complete_sync.assert_not_called()
+
+
 def test_fails_cleanly_on_bad_llm_json():
     from workers.task_handlers import project_revise as mod
 
