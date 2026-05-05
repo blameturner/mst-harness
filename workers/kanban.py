@@ -177,10 +177,25 @@ async def _execute(db: NocodbClient, task: dict) -> None:
         return
 
     try:
+        from workers.project_autonomy import AutonomyBlock, AutonomyBackoff
+    except ImportError:
+        AutonomyBlock = None  # type: ignore[assignment,misc]  # reason: optional module
+        AutonomyBackoff = None  # type: ignore[assignment,misc]  # reason: optional module
+
+    try:
         output = await entry.handler(task)
         await asyncio.to_thread(_mark_done, db, row_id, output)
         _log.info("kanban done  row_id=%s  task_type=%s", row_id, task_type)
     except Exception as exc:
+        if AutonomyBackoff is not None and isinstance(exc, AutonomyBackoff):
+            not_before = (datetime.now(timezone.utc) + timedelta(seconds=exc.delay_seconds)).isoformat()
+            await asyncio.to_thread(_requeue_with_delay, db, row_id, not_before, str(exc))
+            _log.info("kanban autonomy-backoff  row_id=%s  delay=%ds", row_id, exc.delay_seconds)
+            return
+        if AutonomyBlock is not None and isinstance(exc, AutonomyBlock):
+            await asyncio.to_thread(_mark_blocked, db, row_id, str(exc))
+            _log.info("kanban autonomy-blocked  row_id=%s  reason=%s", row_id, exc)
+            return
         _log.warning("kanban error  row_id=%s  task_type=%s  retry=%d  err=%s",
                      row_id, task_type, retry_count, exc)
         if retry_count >= MAX_RETRIES - 1:
@@ -211,6 +226,18 @@ def _mark_failed(db: NocodbClient, row_id: int, error: str) -> None:
     _log.error("kanban failed  row_id=%s", row_id)
 
 
+def _mark_blocked(db: NocodbClient, row_id: int, reason: str) -> None:
+    db._patch(TASK_TABLE, row_id, {
+        "status": "blocked", "error": reason, "completed_at": _iso_now(),
+    })
+    _log.warning("kanban blocked  row_id=%s  reason=%s", row_id, reason)
+
+
+def _requeue_with_delay(db: NocodbClient, row_id: int, not_before: str, reason: str) -> None:
+    db._patch(TASK_TABLE, row_id, {"status": "ready", "not_before": not_before})
+    _log.info("kanban autonomy-requeue  row_id=%s  not_before=%s  reason=%s", row_id, not_before, reason)
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -228,21 +255,25 @@ def submit(
     task_type: str,
     payload: dict,
     *,
+    status: str = "ready",
     created_by: str = "",
     agent: str = "",
+    model: str = "",
 ) -> int:
-    """Insert a ready task into task_list. Returns the NocoDB row Id."""
+    """Insert a task into task_list. Returns the NocoDB row Id."""
     row: dict = {
         "task_type": task_type,
-        "status": "ready",
+        "status": status,
         "input_payload": payload,
     }
     if created_by:
         row["created_by"] = created_by
     if agent:
         row["agent"] = agent
+    if model:
+        row["model"] = model
     result = db._post(TASK_TABLE, row)
-    _log.info("kanban submit  task_type=%s  row_id=%s", task_type, result.get("Id"))
+    _log.info("kanban submit  task_type=%s  status=%s  row_id=%s", task_type, status, result.get("Id"))
     return int(result.get("Id") or 0)
 
 

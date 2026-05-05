@@ -1193,6 +1193,73 @@ class NocodbClient:
             return None
         return self._patch("project_playbooks", playbook_id, {"Id": playbook_id, **data})
 
+    # ── Repo knowledge layer ──────────────────────────────────────────────────
+
+    def get_repo_summary(self, project_id: int) -> dict | None:
+        return self._safe_get(
+            "project_repo_summaries",
+            f"(project_id,eq,{project_id})",
+        )
+
+    def upsert_repo_summary(
+        self,
+        project_id: int,
+        content: str,
+        model_used: str = "",
+    ) -> dict:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.get_repo_summary(project_id)
+        payload: dict = {
+            "project_id": project_id,
+            "content": content,
+            "last_indexed_at": now,
+            "model_used": model_used,
+        }
+        if existing:
+            return self._patch("project_repo_summaries", int(existing["Id"]), payload) or existing
+        return self._safe_post("project_repo_summaries", payload) or {}
+
+    def list_repo_index(
+        self,
+        project_id: int,
+        path_filter: str | None = None,
+    ) -> list[dict]:
+        where = f"(project_id,eq,{project_id})"
+        if path_filter:
+            where = f"{where}~and(path,like,{path_filter})"
+        return self._safe_list("project_repo_index", where, sort="path")
+
+    def upsert_repo_index_entries(
+        self,
+        project_id: int,
+        entries: list[dict],
+    ) -> None:
+        """Upsert each entry on (project_id, path)."""
+        import json as _json
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for entry in entries:
+            path = str(entry.get("path") or "")
+            if not path:
+                continue
+            payload = {
+                "project_id": project_id,
+                "path": path,
+                "purpose": str(entry.get("purpose") or ""),
+                "key_exports": _json.dumps(entry.get("key_exports") or []),
+                "dependencies": _json.dumps(entry.get("dependencies") or []),
+                "last_indexed_at": now,
+            }
+            existing = self._safe_get(
+                "project_repo_index",
+                f"(project_id,eq,{project_id})~and(path,eq,{path})",
+            )
+            if existing:
+                self._patch("project_repo_index", int(existing["Id"]), payload)
+            else:
+                self._safe_post("project_repo_index", payload)
+
     # Reviews (AI code review records)
     def create_review(self, project_id: int, payload: dict) -> dict | None:
         return self._safe_post("project_reviews", {"project_id": project_id, **payload})

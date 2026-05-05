@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from app.routers.code_launch import start_code_job, stream_job_events_response
@@ -251,9 +251,9 @@ def list_project_fs(project_id: int, org_id: int, prefix: str | None = None):
             {
                 "path": r.get("path"),
                 "kind": r.get("kind"),
-                "size": r.get("size_bytes") or 0,
-                "current_version": r.get("current_version_id"),
-                "updated_at": r.get("UpdatedAt"),
+                "size_bytes": r.get("size_bytes") or 0,
+                "current_version_id": r.get("current_version_id"),
+                "UpdatedAt": r.get("UpdatedAt"),
                 "pinned": bool(r.get("pinned")),
                 "locked": bool(r.get("locked")),
             }
@@ -331,9 +331,9 @@ def write_project_file(project_id: int, body: ProjectFileWrite, org_id: int):
         )
         return {"file": file_row, "version": version_row, "changed": changed}
     except ConflictError as e:
-        raise HTTPException(
+        return JSONResponse(
             status_code=409,
-            detail={"error": str(e), "expected": e.expected, "actual": e.actual},
+            content={"error": str(e), "expected": e.expected, "actual": e.actual},
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

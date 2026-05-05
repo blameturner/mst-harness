@@ -1,5 +1,325 @@
 # Codebase Audit
 
+---
+
+## 10. Research Agent Module — Full Diagnostic
+
+### 10.1 Function and Class Map
+
+#### `tools/research/research_planner.py`
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `_emit_progress` | fn | Calls progress_cb with message + step metadata; eats all exceptions |
+| `_fallback_plan` | fn | Deterministic plan generator when LLM fails; builds generic queries from topic string alone, no model call |
+| `_planner_timeout_s` | fn | Reads `research.planner_timeout_s` config; returns int seconds |
+| `_planner_retry_attempts` | fn | Reads `research.planner_retry_attempts` config |
+| `_planner_retry_backoff_s` | fn | Reads `research.planner_retry_backoff_s` config |
+| `_strip_fence` | fn | Strips ` ```json ``` ` fences from raw model output |
+| `_extract_json_object` | fn | Brace-balanced JSON extractor; handles truncated output with best-effort close |
+| `_clean_json_text` | fn | Normalises smart quotes and trailing commas in local-model JSON |
+| `_salvage_queries` | fn | Last-resort: pulls just the `queries` array from malformed model output using regex |
+| `_as_string_list` | fn | Coerces any value to `list[str]` |
+| `_topic_keywords` | fn | Extracts word-level keywords from topic string for low-signal query detection |
+| `_is_low_signal_query` | fn | Rejects queries that are too short, too generic, or don't share keywords with topic |
+| `_normalize_plan_payload` | fn | Dedupes and filters queries; validates schema value types; backfills default schema if empty |
+| `_default_schema_for_topic` | fn | Returns a generic 9-column comparison schema when LLM omitted one |
+| `_generate_plan` | fn | Main LLM call: prompts `research_planner` model; retries with backoff; falls back to `_fallback_plan`; uses a `ThreadPoolExecutor` solely for timeout enforcement |
+| `create_research_plan` | fn | **Public API entry point.** Creates a `research_plans` shell row in NocoDB and submits a `research_planner` Kanban task (or defers if `defer_run=True`) |
+| `run_research_planner_job` | fn | **Kanban handler body.** Called by Kanban worker; calls `_generate_plan`, patches plan row with queries/schema, submits `research_agent` Kanban task |
+| `start_research_plan` | fn | Activates a deferred (hidden) plan row and submits `research_planner` Kanban task |
+| `get_next_plan` | fn | Polls NocoDB for a `status=generating` plan; used by legacy polling paths |
+| `complete_plan` | fn | Sets `status` on a plan row; used by legacy polling paths |
+| `reap_stale_plans` | fn | APScheduler job (every 30 min): marks plans stuck in transient states as failed if no inflight Kanban job references them and they're older than `stale_plan_hours` |
+
+#### `tools/research/agent.py`
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `DOC_TYPES` | dict | 24-entry registry of document format definitions; each entry has `opener`, `closer`, `tone`, `summary_role` |
+| `DEFAULT_DOC_TYPE` | const | `"research_report"` |
+| `_PROTECTED_SECTIONS` | const | `{"Executive Summary", "Key Takeaways", "Sources"}` — reviewer cannot revise these |
+| `_skip_doc_type_inference_basic` | fn | Reads `research.basic_skip_doc_type_inference` feature flag |
+| `_research_timeout` | fn | Reads named timeout key from `research` feature config |
+| `_safe_json_loads` | fn | `json.loads` with fallback on any exception |
+| `_patch_or_log` | fn | `client._patch` with WARNING-level logging on failure |
+| `_safe_call` | fn | Wraps a callable, logs entry/return/error with timing; `timeout_s` arg is accepted but **ignored** (timeout is handled by model pool / httpx) |
+| `_research_intent_dict` | fn | Builds a search intent dict with `SEARCH_POLICY_FULL` and `CHAT_INTENT_RESEARCH` |
+| `_fetch_corpus` | fn | Runs all planner queries through `run_web_search` in a `ThreadPoolExecutor` (max 4 concurrent); dedupes sources; falls back to `_fetch_corpus_raw` if all results are empty |
+| `_fetch_corpus_raw` | fn | Last-resort: calls `searxng_search` then `scrape_page` directly (no LLM in the loop); caps at 3 queries, 10 results, 6 pages, 4000 chars/page |
+| `_infer_doc_type` | fn | Calls `research_doc_type` model to classify topic into one of 24 types; returns `DEFAULT_DOC_TYPE` on any failure |
+| `_section_prompt` | fn | Builds the per-section LLM prompt string from doc_type spec, corpus, hypotheses, optional revision note |
+| `_write_section` | fn | Calls `model_call("research_section_writer")` with up to 3 attempts (progressively smaller context and token budget); returns `str` or `None` |
+| `_write_executive_summary` | fn | Calls `model_call("research_section_writer")` on the assembled body; returns `str` or `None` |
+| `_write_comparison` | fn | Calls `model_call("research_section_writer")` to produce a markdown table from schema columns; skipped if schema is empty |
+| `_write_takeaways_and_recommendation` | fn | Calls `model_call("research_section_writer")` for `## Key Takeaways` + `## Recommendation`; returns `str` or `None` |
+| `_splice_section` | fn | Regex-replaces a named `## heading` in paper markdown; appends if heading not found |
+| `_build_sources` | fn | Builds `## Sources` markdown block from deduplicated source dicts |
+| `_build_generation_notes` | fn | Renders a `## Generation notes` footer listing sections that failed; empty string if nothing failed |
+| `_build_paper` | fn | **Core synthesis engine.** Fetches corpus, writes opener → body sections (parallel, max 3) → comparison → closer → takeaways → exec summary; raises `RuntimeError` only if nothing at all produced |
+| `run_research_agent` | fn | **Kanban handler body.** Loads plan, resolves doc_type, calls `_build_paper`, saves `paper_content` to NocoDB, then ingests into RAG (`ingest_output`) and optionally appends to insight (`append_research`) |
+| `review_research_paper` | fn | **Kanban handler body for review.** Loads existing paper, calls `_generate_revision_notes`, fetches fresh corpus, re-runs only flagged sections via `_write_section`, splices back into paper with `_splice_section` |
+| `_generate_revision_notes` | fn | Calls `model_call("research_reviewer")` with the full paper; parses JSON response; filters out protected sections; returns `{section_title: instruction}` |
+| `get_next_research` | fn | Polls NocoDB for `status=generating` plan; legacy |
+
+#### `tools/research/critic.py`
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `_strip_fence` | fn | Strip markdown code fences |
+| `_extract_json_object` | fn | Brace-balanced JSON extractor |
+| `_coerce_gaps` | fn | Validates gap items into `{field, status, needed}` dicts |
+| `_coerce_queries` | fn | Dedupes and caps query list at 8 |
+| `_fallback_response` | fn | Returns a safe low-confidence critic result on any error |
+| `_normalize_critic_output` | fn | Validates and clamps critic JSON fields; auto-generates queries from gaps if none provided |
+| `analyze_gaps` | fn | **Public.** Calls `model_call("research_agent")` (function name configurable via `research.critic_model`); returns gap analysis dict |
+| `get_confidence_threshold` | fn | Reads `research.confidence_threshold` config (default 80) |
+
+> **Note:** `critic.py` is **not called** from anywhere in the current research flow. The iterative critic loop was removed. `analyze_gaps` exists but has no caller in production code.
+
+#### `tools/research/operations.py`
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `_load_plan` | fn | Fetches a `research_plans` row by id; returns `(client, plan)` |
+| `_doc_type_of` | fn | Reads `_doc_type` from schema JSON or infers via `_infer_doc_type` |
+| `_load_schema` | fn | Parses `schema` JSON column from plan row |
+| `_load_artifacts` | fn | Reads `schema._artifacts` dict from plan row |
+| `_save_artifact` | fn | Upserts an artifact into `schema._artifacts` and patches NocoDB |
+| `_section_split` | fn | Splits paper markdown into `[(full_head, title, body)]` tuples on `##` headings |
+| `_preamble` | fn | Returns text before the first `##` heading |
+| `_replace_section` | fn | Replaces the body of a named `##` section in-place |
+| `_insert_section_before` | fn | Inserts a new `##` section before a named target |
+| `_insert_section_after` | fn | Inserts a new `##` section after a named target |
+| `_build_corpus` | fn | Thin wrapper: reads `queries` from plan row, calls `_fetch_corpus` |
+| `fact_check_paper` | fn | Op: calls `model_call("research_reviewer")` against corpus + paper; saves artifact `fact_check` |
+| `citation_audit_paper` | fn | Op: **no LLM.** Regex-parses inline `[Source: URL]` and `## Sources` block; saves artifact `citation_audit` |
+| `expand_section` | fn | Op: calls `_write_section` with larger `target_words`; replaces section in paper |
+| `add_new_section` | fn | Op: calls `_write_section`; inserts at specified position |
+| `add_counter_arguments` | fn | Convenience wrapper over `add_new_section` with fixed heading and brief |
+| `add_fresh_sources` | fn | Op: optionally calls `model_call("research_planner")` to generate queries, then calls `_fetch_corpus` and `_write_section`; inserts new section before `## Sources` |
+| `refresh_for_recency` | fn | Convenience: appends current year to existing queries, delegates to `add_fresh_sources` |
+| `reframe_for_audience` | fn | Op: whole-paper rewrite via `model_call("research_reviewer", max_tokens=24000)` |
+| `resize_paper` | fn | Op: whole-paper resize via `model_call("research_reviewer")` |
+| `_generic_artifact` | fn | Shared template for artifact-producing ops: loads paper, calls `model_call`, saves artifact |
+| `generate_slide_deck` | fn | Op: calls `_generic_artifact` with slide deck prompt |
+| `generate_email_tldr` | fn | Op: calls `_generic_artifact` with email digest prompt |
+| `generate_qa_pack` | fn | Op: calls `_generic_artifact` with Q&A prompt |
+| `generate_action_plan` | fn | Op: calls `_generic_artifact` with action plan checklist prompt |
+| `chat_with_paper` | fn | Op: **no LLM.** Creates a `conversations` row in NocoDB with a `system_note` that binds it to this plan |
+| `ASYNC_OPS` | dict | 12 named ops dispatched through the Kanban `research_op` handler |
+| `SYNC_OPS` | dict | 2 ops (`citation_audit`, `chat_with_paper`) that run inline (but currently dispatched through the same Kanban handler — the SYNC label is vestigial) |
+| `run_research_op` | fn | **Kanban handler body.** Resolves `kind` → op function in `ASYNC_OPS ∪ SYNC_OPS`; calls it; logs |
+
+#### `tools/research_seeder/agent.py`
+
+| Symbol | Kind | Description |
+|---|---|---|
+| `_cfg` | fn | Reads `research_seeder.*` config key |
+| `_parse_iso` | fn | ISO datetime parser with timezone coercion |
+| `_recent_rows_with_python_cutoff` | fn | NocoDB paginated fetch with Python-side date filtering fallback (NocoDB `gt` filter format varies) |
+| `_existing_plan_topics` | fn | Returns `set[str]` of topics already researched in the past 7 days |
+| `_candidate_topics` | fn | Fetches warm PA topics (`kind=task`, touched in last 24h), ranked by `warmth × engagement_bias` |
+| `_candidate_decisions` | fn | Fetches open decision-intent PA loops created in last 24h |
+| `run_research_seeder` | fn | **Entry point.** Interleaves topics and decisions; calls `create_research_plan` for up to `max_topics_per_night` (default 2); no LLM |
+
+#### Worker handlers (`workers/task_handlers/`)
+
+| File | Handler | What it does |
+|---|---|---|
+| `research_planner.py` | `handle(task)` | Unwraps `input_payload.plan_id`; delegates to `run_research_planner_job(plan_id)` via `asyncio.to_thread` |
+| `research_agent.py` | `handle(task)` | Unwraps `input_payload.plan_id`; delegates to `run_research_agent(plan_id)` via `asyncio.to_thread` |
+| `research_review.py` | `handle(task)` | Unwraps `plan_id` + `instructions`; delegates to `review_research_paper(plan_id, instructions)` via `asyncio.to_thread` |
+| `research_op.py` | `handle(task)` | Passes full `input_payload` dict to `run_research_op(payload)` via `asyncio.to_thread` |
+
+---
+
+### 10.2 Full Call Chain — Normal Research Run
+
+```
+HTTP POST /insights/{id}/research  (app/routers/home.py:insight_deep_dive)
+  → create_research_plan(topic, org_id, parent_insight_id)        [research_planner.py]
+      → NocodbClient._post("research_plans", {..., status="pending"})
+      → kanban.submit(client, "research_planner", {plan_id, org_id}, ...)
+
+Kanban Loop A picks up "research_planner" task
+  → workers/task_handlers/research_planner.py:handle(task)
+      → asyncio.to_thread(run_research_planner_job, plan_id)       [research_planner.py]
+          → NocodbClient._get("research_plans")           # load plan row
+          → _generate_plan(topic, max_queries, progress_cb)
+              → model_call("research_planner", prompt)    # ThreadPoolExecutor for timeout
+              → [retry loop] → _fallback_plan() if all retries fail
+          → NocodbClient._patch("research_plans", plan_id, {hypotheses, sub_topics, queries, schema, status="generating"})
+          → kanban.submit(client, "research_agent", {plan_id, org_id}, ...)
+
+Kanban Loop A picks up "research_agent" task
+  → workers/task_handlers/research_agent.py:handle(task)
+      → asyncio.to_thread(run_research_agent, plan_id)             [agent.py]
+          → NocodbClient._get("research_plans")           # load plan row
+          → _infer_doc_type(topic)                        # optional model_call("research_doc_type")
+          → NocodbClient._patch("research_plans", plan_id, {status="searching"})
+          → _build_paper(topic, doc_type, queries, schema, hypotheses, sub_topics, org_id)
+              → _fetch_corpus(topic, queries, org_id)     # ThreadPoolExecutor, max 4 workers
+                  → run_web_search(q, org_id, ...) × N queries     [search/orchestrator.py]
+                  → [if all empty] → _fetch_corpus_raw()
+                      → searxng_search() × up to 3 queries
+                      → scrape_page() × up to 10 URLs
+              → _write_section("opener") × 1             # model_call("research_section_writer")
+              → _write_section(sub_topic) × N sections   # ThreadPoolExecutor, max 3 workers
+              → _write_comparison()                       # model_call("research_section_writer") if schema
+              → _write_section("closer") × 1             # model_call("research_section_writer")
+              → _write_takeaways_and_recommendation()     # model_call("research_section_writer")
+              → _write_executive_summary()               # model_call("research_section_writer")
+          → NocodbClient._patch("research_plans", plan_id, {paper_content: paper})
+          → NocodbClient._patch("research_plans", plan_id, {status="completed", ...})
+          → ingest_output(paper, org_id, rag_collection="research",
+                          knowledge_collection="research_knowledge")  [workers/post_turn.py]
+              → infra.memory.remember(text, collection="research")        # Chroma embed
+              → infra.memory.remember(text, collection="research_knowledge")
+          → shared.insights.append_research(plan_id, paper, focus)   [if parent_insight_id set]
+```
+
+**Alternative entry point — user creates plan directly (HTTP POST /research/new):**
+```
+HTTP POST /research/new  (app/routers/enrichment.py)
+  → create_research_plan(topic, org_id)
+    [same chain as above from kanban.submit("research_planner") onward]
+```
+
+**Alternative entry point — nightly seeder (APScheduler `_research_seeder_tick`):**
+```
+scheduler.py:_research_seeder_tick()
+  → run_research_seeder(org_id)                                    [research_seeder/agent.py]
+      → _candidate_topics() + _candidate_decisions()               # NocoDB reads, no LLM
+      → create_research_plan(topic, org_id) × up to 2 topics
+        [same chain from kanban.submit("research_planner") onward]
+```
+
+---
+
+### 10.3 Every Search Invocation
+
+| Call site | File:line | Invocation pattern | When called |
+|---|---|---|---|
+| `_fetch_corpus` → `run_web_search` | `agent.py:334` | `run_web_search(q, org_id=org_id, intent_dict=intent, extraction_function_name=extraction_fn)` | During `_build_paper`, once per planner query, parallel up to 4 threads |
+| `_fetch_corpus_raw` → `searxng_search` | `agent.py:427` | `searxng_search(q, max_results=8)` | Fallback only when all `run_web_search` calls returned empty; first 3 queries only |
+| `_fetch_corpus_raw` → `scrape_page` | `agent.py:441` | `scrape_page(url, r.get("snippet", ""))` | After `searxng_search` in raw fallback; up to 10 URLs, first 6 that return text |
+| `_build_corpus` → `_fetch_corpus` | `operations.py:181` | Same signature as above | Called by every op that needs fresh corpus: `fact_check_paper`, `expand_section`, `add_new_section`, `add_counter_arguments`, `add_fresh_sources` |
+| `add_fresh_sources` → `_fetch_corpus` | `operations.py:409` | Same signature, using newly-generated or caller-supplied queries | After fresh query generation |
+| `review_research_paper` → `_fetch_corpus` | `agent.py:1145` | Same signature | During review pass to get fresh corpus for section rewrites |
+
+---
+
+### 10.4 Every Branch and Loop
+
+#### `_generate_plan` (research_planner.py)
+
+- Retry loop: `for attempt in range(1, attempts + 1)` (default 2 attempts, 4s backoff between)
+- Branch: raw model result → `_extract_json_object` → `_clean_json_text` → `json.loads`
+- Branch on parse failure: `_salvage_queries` to pull queries array only
+- Branch: if `normalized` has `"error"` key → continue retry loop
+- Branch after all retries: if `research.planner_fallback_enabled` → `_fallback_plan`; else return error dict
+
+#### `_fetch_corpus` (agent.py)
+
+- Parallel loop: `ThreadPoolExecutor(max_workers=min(4, n_queries))` over queries
+- Cancellation check: `if is_job_cancelled()` inside `_one()` and in `as_completed` loop → raises `JobCancelled`
+- Branch: `if not res` or `if not ctx` → skip (continue collecting)
+- Branch: URL deduplication `if url in seen_urls: continue`
+- Branch after parallel: `if not out_corpus.strip()` → call `_fetch_corpus_raw` fallback
+
+#### `_write_section` (agent.py)
+
+- Retry loop: `for n in range(1, 4)` — 3 attempts with shrinking context/token budget
+  - Attempt 1: `corpus[:30000]`, no `max_tokens` cap
+  - Attempt 2: `corpus[:16000]`, `max_tokens=3000`
+  - Attempt 3: `corpus[:8000]`, `max_tokens=1500`
+- Branch on each attempt: `if not res` → `last_err="timeout_or_error"` → continue
+- Branch: `if not text` → `last_err="empty"` → continue
+- Returns `None` after 3 failures
+
+#### `_build_paper` (agent.py)
+
+- Branch: `if not queries` → raise `RuntimeError` immediately
+- Branch: `if not corpus.strip()` → raise `RuntimeError`
+- Parallel loop (body sections): `ThreadPoolExecutor(max_workers=min(3, n_sub_topics))` 
+- Cancellation check inside body thread: `if _cancelled()` → raises `JobCancelled`
+- Branch: `if schema` → call `_write_comparison`; else skip
+- Sanity gate: `if not opener and not closer and n_body_ok == 0` → raise `RuntimeError`
+- All other partial failures (some body sections empty, opener/closer missing) → log warning, continue
+
+#### `run_research_agent` (agent.py)
+
+- Branch: feature flag `research.agent_enabled` → return disabled dict
+- Branch: `if not plan` → return not_found
+- Branch: `_doc_type` already in schema → use it; else `_skip_doc_type_inference_basic` check; else `_infer_doc_type`
+- Branch: `if is_job_cancelled()` before search → raise `JobCancelled`
+- Branch: `if not paper or not paper.strip()` → patch failed, return
+- Separate patches: `paper_content` saved first; each metadata field in its own patch (any individual rejection is logged but not fatal)
+- Branch: `ingest_output` failure → WARNING log, not fatal
+- Branch: `append_research` failure → WARNING log, not fatal
+
+#### `review_research_paper` (agent.py)
+
+- Branch: plan not found → return
+- Branch: no prior paper → return failed
+- Branch: `_generate_revision_notes` returns empty dict → preserve prior paper, mark complete, return
+- Loop: `for sec_title, note in revision_notes.items()` → `_write_section` + `_splice_section`
+- Branch: `if not sec_md` → skip (continue to next section)
+- Branch: `if revised_count == 0 or not new_paper` → mark completed with error note, return failed
+
+#### `run_research_op` (operations.py)
+
+- Branch: `if not plan_id or not kind` → return failed
+- Branch: `fn = ASYNC_OPS.get(kind) or SYNC_OPS.get(kind)` → if `None` → return failed (unknown kind)
+- Branch: `if not isinstance(result, dict)` → return failed
+
+#### `_generate_revision_notes` (agent.py)
+
+- Branch: `if not res` → return `{}`
+- Branch: fence stripping (starts with ` ``` `)
+- JSON parse with fallback: bracket search on `JSONDecodeError`
+- Branch: `if not isinstance(parsed, dict)` → return `{}`
+- Loop: `for r in revisions` — skip items without `section` or `instructions`, skip protected sections
+
+---
+
+### 10.5 Output File Writes
+
+The research module writes **no files to disk**. All output is persisted to NocoDB rows and Chroma vector collections.
+
+| Output | Location | Written by | Column/Collection |
+|---|---|---|---|
+| Paper content (markdown) | NocoDB `research_plans` | `run_research_agent`, `review_research_paper`, all ops that mutate paper | `paper_content` column |
+| Plan metadata (queries, schema, hypotheses, sub_topics) | NocoDB `research_plans` | `run_research_planner_job` | `hypotheses`, `sub_topics`, `queries`, `schema` columns |
+| Status transitions | NocoDB `research_plans` | `run_research_planner_job`, `run_research_agent`, `review_research_paper` | `status` column (`pending` → `generating` → `searching` → `completed`/`failed`) |
+| Artifacts (slide deck, email, Q&A, etc.) | NocoDB `research_plans.schema._artifacts` (nested JSON) | `_save_artifact` in operations.py | `schema` column (JSON dict with `_artifacts` key) |
+| Conversation link (chat_with_paper) | NocoDB `conversations` | `chat_with_paper` | New row with `system_note` binding to plan |
+| RAG embeddings | Chroma collection `research` | `ingest_output` → `infra.memory.remember` | Called after paper saved |
+| Knowledge embeddings | Chroma collection `research_knowledge` | `ingest_output` → `infra.memory.remember` | Called after paper saved |
+| Insight append | NocoDB `insights.body` (or equivalent) | `shared.insights.append_research` | Called if `parent_insight_id` was set |
+
+---
+
+### 10.6 Kanban Tasks — Enqueued or Depended On
+
+| Task type | Registered in | `llm_bound` | Who submits it | What it triggers |
+|---|---|---|---|---|
+| `research_planner` | `app/lifespan.py:82` | `True` | `create_research_plan()`, `start_research_plan()` | On completion, submits `research_agent` |
+| `research_agent` | `app/lifespan.py:83` | `True` | `run_research_planner_job()` (end of planner task) | No further task; terminal |
+| `research_review` | `app/lifespan.py:84` | `True` | `POST /research/{plan_id}/review` (enrichment router) | No further task; terminal |
+| `research_op` | `app/lifespan.py:85` | `True` | `POST /research/{plan_id}/op/{kind}` (enrichment router) | No further task; terminal |
+
+**No Huey tasks are enqueued or used by the research module.** All four task types live entirely within Kanban Loop A (LLM-bound serial executor).
+
+---
+
+### 10.7 Orphan: `tools/research/critic.py`
+
+`critic.py` (`analyze_gaps`, `get_confidence_threshold`) is **unreachable in production**. The iterative critic loop was removed from `agent.py`. The module is imported nowhere. It is dead code.
+
+---
+
 ## 1. Graph Search UI — Frontend & Backend
 
 **No frontend UI exists in this repo.** Graph search is API-only; the UI lives in a separate frontend repository.

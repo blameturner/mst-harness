@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -176,3 +177,40 @@ def get_feature_with_override(section: str, key: str, default: Any = None) -> An
         return override
     from infra.config import get_feature
     return get_feature(section, key, default)
+
+
+# ── OpenRouter connection ──────────────────────────────────────────────────────
+
+OPENROUTER_AGENT = "__openrouter__"
+
+
+def get_openrouter_connection() -> dict | None:
+    """Return stored OpenRouter config, or None if no API key is set."""
+    data = _cached(OPENROUTER_AGENT)
+    return data if data.get("api_key") else None
+
+
+def upsert_openrouter_connection(api_key: str, base_url: str = "") -> dict:
+    # Always write base_url so a second save with "" doesn't silently leave stale data.
+    data: dict = {"api_key": api_key, "base_url": base_url}
+    _write_row(OPENROUTER_AGENT, data)
+    _invalidate(OPENROUTER_AGENT)
+    return data
+
+
+def delete_openrouter_connection() -> bool:
+    data = _cached(OPENROUTER_AGENT)
+    if not data.get("api_key"):
+        return False
+    _write_row(OPENROUTER_AGENT, {})
+    _invalidate(OPENROUTER_AGENT)
+    return True
+
+
+def mark_openrouter_verified() -> None:
+    data = dict(_cached(OPENROUTER_AGENT))
+    if not data:
+        return
+    data["verified_at"] = datetime.now(timezone.utc).isoformat()
+    _write_row(OPENROUTER_AGENT, data)
+    _invalidate(OPENROUTER_AGENT)

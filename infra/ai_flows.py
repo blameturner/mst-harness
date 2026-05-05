@@ -11,6 +11,7 @@ from typing import Any
 
 from infra.config import get_function_config
 from shared.models import model_call
+from tools.project.review import build_review_context
 
 _log = logging.getLogger("ai_flows")
 
@@ -59,13 +60,23 @@ _CODE_REVIEW_PROMPT = """You are reviewing a code diff. Return JSON only, no pro
   "suggested_followups": ["<short bullet>", "..."]
 }
 
-DIFF:
 %s
 """
 
 
-def review_diff(unified_diff: str) -> dict:
-    prompt = _CODE_REVIEW_PROMPT % _truncate(unified_diff, "code_review")
+def review_diff(
+    unified_diff: str,
+    feature_description: str = "",
+    repo_summary: str = "",
+    architectural_rules: str = "",
+) -> dict:
+    context = build_review_context(
+        _truncate(unified_diff, "code_review"),
+        feature_description,
+        repo_summary,
+        architectural_rules,
+    )
+    prompt = _CODE_REVIEW_PROMPT % context
     raw, tokens = model_call("code_review", prompt)
     parsed = _extract_json(raw) or {}
     if not isinstance(parsed, dict):

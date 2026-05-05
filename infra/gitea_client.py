@@ -92,6 +92,10 @@ class GiteaClient:
         r = requests.put(self._url(path), headers=self._headers(), json=body, timeout=REQUEST_TIMEOUT)
         return self._check(r)
 
+    def _patch_raw(self, path: str, body: dict) -> Any:
+        r = requests.patch(self._url(path), headers=self._headers(), json=body, timeout=REQUEST_TIMEOUT)
+        return self._check(r)
+
     # ---------- discovery ----------
     def server_version(self) -> str:
         try:
@@ -294,3 +298,87 @@ class GiteaClient:
         body = {"sha": sha, "branch": branch, "message": message}
         r = requests.delete(url, headers=self._headers(), json=body, timeout=REQUEST_TIMEOUT)
         return self._check(r) or {}
+
+    # ---------- branches & PRs ----------
+
+    def create_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch_name: str,
+        from_branch: str = "main",
+    ) -> dict:
+        return self._post(
+            f"/repos/{owner}/{repo}/branches",
+            {"new_branch_name": branch_name, "old_branch_name": from_branch},
+        ) or {}
+
+    def list_prs(
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        limit: int = 50,
+    ) -> list[dict]:
+        data = self._get(
+            f"/repos/{owner}/{repo}/pulls",
+            params={"state": state, "limit": limit},
+        )
+        return data if isinstance(data, list) else []
+
+    def create_pr(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        head: str,
+        base: str,
+        body: str = "",
+    ) -> dict:
+        return self._post(
+            f"/repos/{owner}/{repo}/pulls",
+            {"title": title, "head": head, "base": base, "body": body},
+        ) or {}
+
+    def get_pr(self, owner: str, repo: str, pr_id: int) -> dict:
+        return self._get(f"/repos/{owner}/{repo}/pulls/{pr_id}") or {}
+
+    def get_pr_diff(self, owner: str, repo: str, pr_id: int) -> str:
+        """Return the unified diff for a PR as a plain string."""
+        url = self._url(f"/repos/{owner}/{repo}/pulls/{pr_id}.diff")
+        r = requests.get(url, headers={"Authorization": f"token {self.token}"}, timeout=REQUEST_TIMEOUT * 2)
+        if r.status_code >= 400:
+            raise GiteaError(f"get_pr_diff {pr_id} -> {r.status_code}: {r.text[:200]}", r.status_code)
+        return r.text
+
+    def merge_pr(
+        self,
+        owner: str,
+        repo: str,
+        pr_id: int,
+        merge_method: str = "merge",
+        message: str = "",
+    ) -> None:
+        self._post(
+            f"/repos/{owner}/{repo}/pulls/{pr_id}/merge",
+            {"Do": merge_method, "merge_message_field": message},
+        )
+
+    def close_pr(self, owner: str, repo: str, pr_id: int) -> dict:
+        return self._patch_raw(
+            f"/repos/{owner}/{repo}/pulls/{pr_id}",
+            {"state": "closed"},
+        ) or {}
+
+    def list_issues(
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        limit: int = 50,
+    ) -> list[dict]:
+        data = self._get(
+            f"/repos/{owner}/{repo}/issues",
+            params={"state": state, "type": "issues", "limit": limit},
+        )
+        return data if isinstance(data, list) else []

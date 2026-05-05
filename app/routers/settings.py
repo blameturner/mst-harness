@@ -1,14 +1,17 @@
-"""Settings API — per-agent defaults and config.json override layer."""
+"""Settings API — per-agent defaults, config.json overrides, and external connections."""
 from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from infra import settings as _settings
 from infra.config import PLATFORM, get_feature
+from shared.model_client import reset_model_client
 
 _log = logging.getLogger("main.settings")
 
@@ -105,3 +108,94 @@ def delete_config_override(section: str, key: str):
     _write_row(CONFIG_AGENT, overrides)
     _invalidate(CONFIG_AGENT)
     return {"ok": True, "section": section, "key": key}
+
+
+# ── OpenRouter connection ──────────────────────────────────────────────────────
+
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Private IP ranges that must never be targeted by user-supplied base_url (SSRF).
+_SSRF_BLOCKED_PREFIXES = ("127.", "10.", "192.168.", "169.254.", "::1", "0.")
+
+
+class OpenRouterConnectionPayload(BaseModel):
+    api_key: str
+    base_url: str = ""
+
+
+def _validate_base_url(url: str) -> str:
+    """Reject non-HTTPS and private-range targets to prevent SSRF."""
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise HTTPException(400, "base_url must use https://")
+    host = parsed.hostname or ""
+    if any(host.startswith(p) for p in _SSRF_BLOCKED_PREFIXES):
+        raise HTTPException(400, "base_url must not target a private network address")
+    return url.rstrip("/")
+
+
+def _redact_openrouter(conn: dict | None) -> dict | None:
+    if not conn:
+        return None
+    out = dict(conn)
+    if out.get("api_key"):
+        out["api_key"] = "***"
+    return out
+
+
+@router.get("/connections/openrouter")
+def get_openrouter_connection():
+    return {"connection": _redact_openrouter(_settings.get_openrouter_connection())}
+
+
+@router.put("/connections/openrouter")
+async def upsert_openrouter_connection(body: OpenRouterConnectionPayload):
+    safe_base_url = _validate_base_url(body.base_url)
+    conn = _settings.upsert_openrouter_connection(body.api_key, safe_base_url)
+    effective_url = safe_base_url or _OPENROUTER_DEFAULT_BASE_URL
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{effective_url}/models",
+                headers={"Authorization": f"Bearer {body.api_key}"},
+            )
+            r.raise_for_status()
+        _settings.mark_openrouter_verified()
+        verified = True
+    except Exception as exc:
+        _log.warning("openrouter verify failed: %s", exc)
+        verified = False
+    reset_model_client()
+    return {"connection": _redact_openrouter(conn), "verified": verified}
+
+
+@router.delete("/connections/openrouter")
+def delete_openrouter_connection():
+    ok = _settings.delete_openrouter_connection()
+    if ok:
+        reset_model_client()
+    return {"ok": ok}
+
+
+@router.post("/connections/openrouter/test")
+async def test_openrouter_connection():
+    conn = _settings.get_openrouter_connection()
+    if not conn or not conn.get("api_key"):
+        raise HTTPException(400, "openrouter not configured")
+    base_url = conn.get("base_url") or _OPENROUTER_DEFAULT_BASE_URL
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {conn['api_key']}"},
+            )
+            r.raise_for_status()
+            model_count = len(r.json().get("data") or [])
+        _settings.mark_openrouter_verified()
+        return {"ok": True, "model_count": model_count}
+    except httpx.HTTPStatusError as exc:
+        return {"ok": False, "error": str(exc), "status": exc.response.status_code}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

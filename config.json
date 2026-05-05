@@ -97,7 +97,19 @@
         "scrape_classifier": { "role": "t3_tool",    "temperature": 0.1, "max_tokens": 200, "max_input_chars": 8000 }
       }
     },
+    "teaching": {
+      "output_dir": "/tmp/jeffgpt_teaching_output",
+      "enabled": true,
+      "models": {
+        "teaching_curriculum":  { "role": "t1_secondary", "temperature": 0.2, "max_tokens": 4000,  "max_input_chars": 12000 },
+        "teaching_lesson":      { "role": "t1_secondary", "temperature": 0.3, "max_tokens": 12000, "max_input_chars": 32000 },
+        "teaching_lesson_meta": { "role": "t3_tool",      "temperature": 0.2, "max_tokens": 3000,  "max_input_chars": 16000 },
+        "teaching_revision":    { "role": "t1_secondary", "temperature": 0.3, "max_tokens": 12000, "max_input_chars": 32000 },
+        "teaching_check":       { "role": "t3_tool",      "temperature": 0.2, "max_tokens": 2000,  "max_input_chars": 12000 }
+      }
+    },
     "research": {
+      "output_dir": "/tmp/jeffgpt_research_output",
       "planner_enabled": true,
       "agent_enabled": true,
       "max_queries": 8,
@@ -279,6 +291,17 @@
         "insight_topic_picker": { "role": "t3_tool",    "temperature": 0.3, "max_tokens": 500,  "max_input_chars": 6000 },
         "insight_synthesis":    { "role": "t1_primary", "temperature": 0.3, "max_tokens": 3500, "max_input_chars": 28000 },
         "insight_ack":          { "role": "exp_rwkv_r", "temperature": 0.4, "max_tokens": 120,  "max_input_chars": 1500 }
+      }
+    },
+    "project": {
+      "autonomy_mode": "proposal-only",
+      "max_tasks_per_hour": 4,
+      "max_queued_proposals": 10,
+      "max_daily_tokens": 100000,
+      "consecutive_failure_backoff": true,
+      "models": {
+        "project_agent": { "role": "t2_coder" },
+        "project_po":    { "role": "t1_primary" }
       }
     },
     "tool_queue": {

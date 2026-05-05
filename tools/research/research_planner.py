@@ -555,10 +555,15 @@ def create_research_plan(
     return {"status": "queued", "plan_id": plan_id, "task_id": task_id}
 
 
-def run_research_planner_job(plan_id: int) -> dict:
-    """Planner tool-queue handler: generate queries/schema for an existing row, then queue the agent."""
+def run_research_planner_job(plan_id: int, *, queue_agent: bool = True) -> dict:
+    """Generate queries/schema for an existing plan row.
+
+    When ``queue_agent=False`` the caller is responsible for running the agent
+    directly (used by the orchestrating 'research' Kanban handler to avoid
+    double-execution). When ``queue_agent=True`` (default) a 'research_agent'
+    Kanban task is submitted so the two-step legacy path continues to work.
+    """
     from infra.nocodb_client import NocodbClient
-    from workers.tool_queue import report_progress
 
     if not get_feature("research", "planner_enabled", True):
         return {"status": "disabled", "error": "research_planner feature disabled"}
@@ -578,8 +583,8 @@ def run_research_planner_job(plan_id: int) -> dict:
         client._patch("research_plans", plan_id, {"status": "failed", "error_message": "no topic"})
         return {"status": "failed", "error": "no topic", "plan_id": plan_id}
 
-    report_progress("planner phase: loaded plan", kind="plan", step=1, total=5)
-    generated = _generate_plan(topic, max_queries, progress_cb=report_progress)
+    _log.info("planner: generating plan  plan_id=%d  topic=%s", plan_id, topic[:60])
+    generated = _generate_plan(topic, max_queries)
     if "error" in generated:
         client._patch("research_plans", plan_id, {
             "status": "failed",
@@ -590,7 +595,6 @@ def run_research_planner_job(plan_id: int) -> dict:
     queries = (generated.get("queries") or [])[:max_queries]
 
     try:
-        report_progress("planner phase: saving queries/schema", kind="plan", step=4, total=5)
         client._patch("research_plans", plan_id, {
             "hypotheses": json.dumps(generated.get("hypotheses", [])),
             "sub_topics": json.dumps(generated.get("sub_topics", [])),
@@ -603,7 +607,10 @@ def run_research_planner_job(plan_id: int) -> dict:
         client._patch("research_plans", plan_id, {"status": "failed", "error_message": str(e)[:500]})
         return {"status": "failed", "error": str(e)[:200], "plan_id": plan_id}
 
-    report_progress("planner phase: queueing research agent", kind="plan", step=5, total=5)
+    if not queue_agent:
+        _log.info("planner: plan ready, agent will run inline  plan_id=%d  queries=%d", plan_id, len(queries))
+        return {"status": "queued", "plan_id": plan_id, "queries": len(queries)}
+
     try:
         from workers import kanban
         agent_task_id = kanban.submit(
@@ -618,7 +625,7 @@ def run_research_planner_job(plan_id: int) -> dict:
             "error_message": f"agent_queue_failed: {str(e)[:300]}",
         })
         return {"status": "failed", "error": f"agent_queue_failed: {str(e)[:200]}", "plan_id": plan_id}
-    _log.info("Queued research agent task_id=%d plan_id=%d", agent_task_id, plan_id)
+    _log.info("planner: queued research agent  task_id=%d  plan_id=%d", agent_task_id, plan_id)
     return {
         "status": "queued",
         "plan_id": plan_id,

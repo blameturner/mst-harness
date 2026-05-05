@@ -127,6 +127,7 @@ class OpenRouterBackend:
     def __init__(
         self,
         api_key: str | None,
+        base_url: str = _OPENROUTER_BASE_URL,
         *,
         client: httpx.AsyncClient | None = None,
         # Inject a fixed allowlist to skip the fetch entirely (tests only).
@@ -134,6 +135,7 @@ class OpenRouterBackend:
     ) -> None:
         self._disabled = not api_key
         self._api_key = api_key or ""
+        self._base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {self._api_key}"} if api_key else {}
         self._client = client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, headers=headers)
         self._allowlist: frozenset[str] = _allowlist or frozenset()
@@ -155,7 +157,7 @@ class OpenRouterBackend:
                 f"use a ':free' model or one priced at $0 for prompt and completion"
             )
         payload = {"model": model, "messages": messages, **kwargs}
-        url = f"{_OPENROUTER_BASE_URL}/chat/completions"
+        url = f"{self._base_url}/chat/completions"
         try:
             r = await self._client.post(url, json=payload)
             r.raise_for_status()
@@ -188,7 +190,7 @@ class OpenRouterBackend:
 
     async def _fetch_allowlist(self) -> frozenset[str]:
         try:
-            r = await self._client.get(f"{_OPENROUTER_BASE_URL}/models")
+            r = await self._client.get(f"{self._base_url}/models")
             r.raise_for_status()
             models: list[dict] = r.json().get("data") or []
             result = frozenset(m["id"] for m in models if _is_free_model(m))
@@ -255,12 +257,34 @@ def build_model_client() -> ModelClient:
         if _instance is not None:
             return _instance
         from infra.config import get_model_url  # lazy — config init not guaranteed at import time
-        api_key = os.environ.get(_OPENROUTER_API_KEY_ENV, "").strip() or None
+        from infra.settings import get_openrouter_connection
+        conn = get_openrouter_connection()
+        api_key = (conn or {}).get("api_key") or os.environ.get(_OPENROUTER_API_KEY_ENV, "").strip() or None
+        base_url = (conn or {}).get("base_url") or _OPENROUTER_BASE_URL
         _instance = ModelClient(
             llama_cpp=LlamaCppBackend(url_resolver=get_model_url),
-            openrouter=OpenRouterBackend(api_key),
+            openrouter=OpenRouterBackend(api_key, base_url),
         )
         return _instance
+
+
+def reset_model_client() -> None:
+    """Drop the singleton so the next call to build_model_client() re-reads config.
+
+    Schedules aclose() on the old client if an event loop is running so the
+    underlying httpx connection pool is not leaked. If no loop is running (e.g.
+    called from a test or startup path) the client is simply dropped and GC will
+    emit a ResourceWarning — callers there should use close_model_client() instead.
+    """
+    global _instance
+    with _instance_lock:
+        old, _instance = _instance, None
+    if old is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(old.aclose())
+        except RuntimeError:
+            pass  # no running loop; caller is responsible for cleanup
 
 
 async def close_model_client() -> None:

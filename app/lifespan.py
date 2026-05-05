@@ -55,6 +55,18 @@ async def lifespan(app: FastAPI):
     tool_queue.start()
     _log.info("tool job queue running")
 
+    from infra.config import get_feature as _get_feature
+    _research_output_dir = _get_feature("research", "output_dir", None)
+    if not _research_output_dir:
+        raise RuntimeError("features.research.output_dir is not set in config — must be an absolute path")
+    from tools.research.output import init_output_dir as _init_research_output_dir
+    _init_research_output_dir(_research_output_dir)
+
+    _teaching_output_dir = _get_feature("teaching", "output_dir", None)
+    if _teaching_output_dir:
+        from tools.teaching.output import init_output_dir as _init_teaching_output_dir
+        _init_teaching_output_dir(_teaching_output_dir)
+
     import asyncio as _asyncio
     from workers import kanban as _kanban
     from workers.task_handlers import scrape_page as _scrape_page_handler
@@ -65,6 +77,8 @@ async def lifespan(app: FastAPI):
     from workers.task_handlers import research_agent as _research_agent_handler
     from workers.task_handlers import research_review as _research_review_handler
     from workers.task_handlers import research_op as _research_op_handler
+    from workers.task_handlers import research as _research_handler
+    from workers.task_handlers import research_revision as _research_revision_handler
     from workers.task_handlers import graph_extract as _graph_extract_handler
     from workers.task_handlers import summarise_page as _summarise_page_handler
     from workers.task_handlers import extract_relationships as _extract_relationships_handler
@@ -74,6 +88,16 @@ async def lifespan(app: FastAPI):
     from workers.task_handlers import daily_digest as _daily_digest_handler
     from workers.task_handlers import pathfinder_extract as _pathfinder_extract_handler
     from workers.task_handlers import graph_resolve_entities as _graph_resolve_entities_handler
+    from workers.task_handlers import project_feature as _project_feature_handler
+    from workers.task_handlers import project_review as _project_review_handler
+    from workers.task_handlers import project_propose as _project_propose_handler
+    from workers.task_handlers import project_index as _project_index_handler
+    from workers.task_handlers import project_human_review as _project_human_review_handler
+    from workers.task_handlers import project_revise as _project_revise_handler
+    from workers.task_handlers import teaching_curriculum as _teaching_curriculum_handler
+    from workers.task_handlers import teaching_lesson as _teaching_lesson_handler
+    from workers.task_handlers import teaching_revision as _teaching_revision_handler
+    from workers.task_handlers import teaching_check as _teaching_check_handler
     from infra.nocodb_client import NocodbClient as _NocodbClient
     _kanban.register("scrape_page", _scrape_page_handler.handle, llm_bound=False)
     _kanban.register("corpus_maintenance", _corpus_maintenance_handler.handle, llm_bound=False)
@@ -83,6 +107,8 @@ async def lifespan(app: FastAPI):
     _kanban.register("research_agent", _research_agent_handler.handle, llm_bound=True)
     _kanban.register("research_review", _research_review_handler.handle, llm_bound=True)
     _kanban.register("research_op", _research_op_handler.handle, llm_bound=True)
+    _kanban.register("research", _research_handler.handle, llm_bound=True)
+    _kanban.register("research_revision", _research_revision_handler.handle, llm_bound=True)
     _kanban.register("graph_extract", _graph_extract_handler.handle, llm_bound=True)
     _kanban.register("summarise_page", _summarise_page_handler.handle, llm_bound=True)
     _kanban.register("extract_relationships", _extract_relationships_handler.handle, llm_bound=True)
@@ -92,6 +118,16 @@ async def lifespan(app: FastAPI):
     _kanban.register("daily_digest", _daily_digest_handler.handle, llm_bound=True)
     _kanban.register("pathfinder_extract", _pathfinder_extract_handler.handle, llm_bound=False)
     _kanban.register("graph_resolve_entities", _graph_resolve_entities_handler.handle, llm_bound=True)
+    _kanban.register("project_feature",       _project_feature_handler.handle,       llm_bound=True)
+    _kanban.register("project_review",        _project_review_handler.handle,        llm_bound=True)
+    _kanban.register("project_propose",       _project_propose_handler.handle,       llm_bound=True)
+    _kanban.register("project_index",         _project_index_handler.handle,         llm_bound=True)
+    _kanban.register("project_human_review",  _project_human_review_handler.handle,  llm_bound=False)
+    _kanban.register("project_revise",        _project_revise_handler.handle,        llm_bound=True)
+    _kanban.register("teaching_curriculum",   _teaching_curriculum_handler.handle,   llm_bound=True)
+    _kanban.register("teaching_lesson",       _teaching_lesson_handler.handle,       llm_bound=True)
+    _kanban.register("teaching_revision",     _teaching_revision_handler.handle,     llm_bound=True)
+    _kanban.register("teaching_check",        _teaching_check_handler.handle,        llm_bound=True)
     _kanban_db = _NocodbClient()
     _kanban_llm_task = _asyncio.create_task(_kanban.run_llm_loop(_kanban_db), name="kanban-llm")
     _kanban_non_llm_task = _asyncio.create_task(_kanban.run_non_llm_loop(_kanban_db), name="kanban-non-llm")
