@@ -155,17 +155,16 @@ def _claim_next(db: NocodbClient, task_types: set[str]) -> dict | None:
     if not db._has_table(TASK_TABLE):
         return None
     now = _iso_now()
-    type_clause = "~or".join(f"(task_type,eq,{t})" for t in task_types)
     where = (
         f"(status,eq,ready)"
-        f"~and({type_clause})"
         f"~and((not_before,le,{now})~or(not_before,is,null))"
     )
-    rows = db._get(TASK_TABLE, params={"where": where, "sort": "CreatedAt", "limit": 1}).get("list", [])
-    if not rows:
+    rows = db._get(TASK_TABLE, params={"where": where, "sort": "CreatedAt", "limit": 50}).get("list", [])
+    matching = [r for r in rows if r.get("task_type") in task_types]
+    if not matching:
         return None
 
-    row = rows[0]
+    row = matching[0]
     row_id = row["Id"]
     worker_id = uuid.uuid4().hex
     db._patch(TASK_TABLE, row_id, {"status": "claimed", "started_at": now, "claimed_by": worker_id})
