@@ -191,8 +191,9 @@ def get_openrouter_connection() -> dict | None:
 
 
 def upsert_openrouter_connection(api_key: str, base_url: str = "") -> dict:
-    # Always write base_url so a second save with "" doesn't silently leave stale data.
-    data: dict = {"api_key": api_key, "base_url": base_url}
+    # Preserve extra fields (e.g. allowed_models) set independently.
+    existing = dict(_cached(OPENROUTER_AGENT))
+    data: dict = {**existing, "api_key": api_key, "base_url": base_url}
     _write_row(OPENROUTER_AGENT, data)
     _invalidate(OPENROUTER_AGENT)
     return data

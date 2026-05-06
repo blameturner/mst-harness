@@ -188,6 +188,41 @@ def delete_openrouter_connection():
     return {"ok": ok}
 
 
+@router.get("/connections/openrouter/models")
+async def list_openrouter_models():
+    """Return the list of models available on the configured OpenRouter account."""
+    conn = _settings.get_openrouter_connection()
+    if not conn or not conn.get("api_key"):
+        return {"models": [], "enabled": False}
+    base_url = conn.get("base_url") or _OPENROUTER_DEFAULT_BASE_URL
+    allowed = conn.get("allowed_models") or []
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {conn['api_key']}"},
+            )
+            r.raise_for_status()
+            data = r.json().get("data") or []
+            models = [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+            return {"models": models, "allowed": allowed, "enabled": True}
+    except Exception as exc:
+        _log.warning("openrouter models fetch failed: %s", exc)
+        fallback: list[str] = []
+        return {"models": fallback, "allowed": allowed, "enabled": True, "fallback": True}
+
+
+class OpenRouterAllowlistPayload(BaseModel):
+    models: list[str]
+
+
+@router.patch("/connections/openrouter/allowlist")
+def set_openrouter_allowlist(payload: OpenRouterAllowlistPayload):
+    _settings.set_agent_setting(_settings.OPENROUTER_AGENT, "allowed_models", payload.models)
+    reset_model_client()
+    return {"ok": True, "count": len(payload.models)}
+
+
 @router.post("/connections/openrouter/test")
 async def test_openrouter_connection():
     conn = _settings.get_openrouter_connection()

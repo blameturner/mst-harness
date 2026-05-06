@@ -157,7 +157,7 @@ def _claim_next(db: NocodbClient, task_types: set[str]) -> dict | None:
     now = _iso_now()
     where = (
         f"(status,eq,ready)"
-        f"~and((not_before,le,{now})~or(not_before,is,null))"
+        f"~and((not_before,lte,{now})~or(not_before,is,null))"
     )
     rows = db._get(TASK_TABLE, params={"where": where, "sort": "CreatedAt", "limit": 50}).get("list", [])
     matching = [r for r in rows if r.get("task_type") in task_types]
@@ -267,11 +267,11 @@ def _requeue_with_delay(db: NocodbClient, row_id: int, not_before: str, reason: 
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def _iso_future(seconds: float) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(tzinfo=None).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def _chat_active() -> bool:
