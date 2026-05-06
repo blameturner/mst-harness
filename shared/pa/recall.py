@@ -468,7 +468,7 @@ def _build_loops(
         rows = client._get_paginated(NOCODB_TABLE_PA_OPEN_LOOPS, params={
             "where": (
                 f"(org_id,eq,{org_id})~and(status,eq,{LOOP_STATUS_OPEN})"
-                f"~or((org_id,eq,{org_id})~and(status,eq,{LOOP_STATUS_NUDGED}))"
+                f"~or(org_id,eq,{org_id})~and(status,eq,{LOOP_STATUS_NUDGED})"
             ),
             "sort": "-CreatedAt",
             "limit": 100,

@@ -193,7 +193,7 @@ async def list_openrouter_models():
     """Return the list of models available on the configured OpenRouter account."""
     conn = _settings.get_openrouter_connection()
     if not conn or not conn.get("api_key"):
-        return {"models": [], "enabled": False}
+        return {"models": [], "allowed": [], "enabled": False}
     base_url = conn.get("base_url") or _OPENROUTER_DEFAULT_BASE_URL
     allowed = conn.get("allowed_models") or []
     try:

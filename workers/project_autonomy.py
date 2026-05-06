@@ -82,10 +82,10 @@ def _check_queue_depth(db: NocodbClient, project_id: int) -> None:
         "where": (
             f"(created_by,eq,project:{project_id})"
             "~and(task_type,eq,project_propose)"
-            "~and((status,eq,ready)~or(status,eq,pending)~or(status,eq,claimed))"
         ),
         "limit": limit + 1,
     }).get("list", [])
+    rows = [r for r in rows if r.get("status") in ("ready", "pending", "claimed")]
     if len(rows) >= limit:
         raise AutonomyBlock(
             f"proposal queue at limit ({limit}); no new proposals until the queue drains"
@@ -143,13 +143,11 @@ def _check_consecutive_failures(db: NocodbClient, project_id: int) -> None:
         )
 
     rows = db._get(TASK_TABLE, params={
-        "where": (
-            f"(created_by,eq,project:{project_id})"
-            "~and((status,eq,done)~or(status,eq,failed)~or(status,eq,blocked))"
-        ),
+        "where": f"(created_by,eq,project:{project_id})",
         "sort": "-completed_at",
-        "limit": 6,
+        "limit": 20,
     }).get("list", [])
+    rows = [r for r in rows if r.get("status") in ("done", "failed", "blocked")][:6]
 
     streak = 0
     for row in rows:

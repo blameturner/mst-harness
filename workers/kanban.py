@@ -155,12 +155,12 @@ def _claim_next(db: NocodbClient, task_types: set[str]) -> dict | None:
     if not db._has_table(TASK_TABLE):
         return None
     now = _iso_now()
-    where = (
-        f"(status,eq,ready)"
-        f"~and((not_before,lte,{now})~or(not_before,is,null))"
-    )
-    rows = db._get(TASK_TABLE, params={"where": where, "sort": "CreatedAt", "limit": 50}).get("list", [])
-    matching = [r for r in rows if r.get("task_type") in task_types]
+    rows = db._get(TASK_TABLE, params={"where": "(status,eq,ready)", "sort": "CreatedAt", "limit": 50}).get("list", [])
+    matching = [
+        r for r in rows
+        if r.get("task_type") in task_types
+        and (not r.get("not_before") or r["not_before"] <= now)
+    ]
     if not matching:
         return None
 
