@@ -173,8 +173,9 @@ async def upsert_openrouter_connection(body: OpenRouterConnectionPayload):
             r.raise_for_status()
         _settings.mark_openrouter_verified()
         verified = True
+        _log.info("openrouter connection saved  base_url=%s  verified=true", effective_url)
     except Exception as exc:
-        _log.warning("openrouter verify failed: %s", exc)
+        _log.warning("openrouter verify failed  base_url=%s  err=%s", effective_url, exc)
         verified = False
     reset_model_client()
     return {"connection": _redact_openrouter(conn), "verified": verified}
@@ -185,6 +186,7 @@ def delete_openrouter_connection():
     ok = _settings.delete_openrouter_connection()
     if ok:
         reset_model_client()
+        _log.info("openrouter connection deleted")
     return {"ok": ok}
 
 
@@ -205,9 +207,10 @@ async def list_openrouter_models():
             r.raise_for_status()
             data = r.json().get("data") or []
             models = [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+            _log.info("openrouter models listed  count=%d  allowed=%d", len(models), len(allowed))
             return {"models": models, "allowed": allowed, "enabled": True}
     except Exception as exc:
-        _log.warning("openrouter models fetch failed: %s", exc)
+        _log.warning("openrouter models fetch failed  err=%s", exc)
         fallback: list[str] = []
         return {"models": fallback, "allowed": allowed, "enabled": True, "fallback": True}
 
@@ -220,6 +223,7 @@ class OpenRouterAllowlistPayload(BaseModel):
 def set_openrouter_allowlist(payload: OpenRouterAllowlistPayload):
     _settings.set_agent_setting(_settings.OPENROUTER_AGENT, "allowed_models", payload.models)
     reset_model_client()
+    _log.info("openrouter allowlist updated  count=%d", len(payload.models))
     return {"ok": True, "count": len(payload.models)}
 
 
@@ -238,8 +242,11 @@ async def test_openrouter_connection():
             r.raise_for_status()
             model_count = len(r.json().get("data") or [])
         _settings.mark_openrouter_verified()
+        _log.info("openrouter connection tested  ok=true  model_count=%d", model_count)
         return {"ok": True, "model_count": model_count}
     except httpx.HTTPStatusError as exc:
+        _log.warning("openrouter connection test failed  status=%d  err=%s", exc.response.status_code, exc)
         return {"ok": False, "error": str(exc), "status": exc.response.status_code}
     except Exception as exc:
+        _log.warning("openrouter connection test failed  err=%s", exc)
         return {"ok": False, "error": str(exc)}

@@ -11,7 +11,9 @@
       "WebFetch(domain:github.com)",
       "Bash(python3:*)",
       "Read(//Users/michaelturner/WebstormProjects/JeffGPT-gw-ui/**)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "WebFetch(domain:openrouter.ai)",
+      "Bash(git *)"
     ]
   }
 }

@@ -12,17 +12,11 @@ from shared.model_client import (
     LlamaCppBackend,
     ModelClient,
     OpenRouterBackend,
-    _FREE_TIER_FALLBACK,
-    _is_free_model,
     _parse_openai_response,
     build_model_client,
 )
 
 _RESOLVER = lambda m: "http://localhost:8080"  # noqa: E731
-
-_FREE_MODEL = "google/gemma-3n-e4b-it:free"
-_PAID_MODEL = "anthropic/claude-opus-4"
-_STUB_ALLOWLIST = frozenset({_FREE_MODEL})
 
 
 def _openai_response(text: str, model: str = "test-model", tokens_in: int = 10, tokens_out: int = 20) -> dict:
@@ -81,6 +75,16 @@ class ParseOpenAIResponseTests(unittest.TestCase):
         self.assertIsNotNone(result.error)
         self.assertEqual(result.text, "")
         self.assertEqual(result.finish_reason, "error")
+
+    def test_falls_back_to_reasoning_content_when_content_empty(self):
+        data = {
+            "model": "deepseek/r1",
+            "choices": [{"message": {"content": "", "reasoning_content": "my reasoning"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 5},
+        }
+        result = _parse_openai_response(data, "deepseek/r1")
+        self.assertEqual(result.text, "my reasoning")
+        self.assertIsNone(result.error)
 
 
 class LlamaCppBackendTests(unittest.IsolatedAsyncioTestCase):
@@ -149,116 +153,60 @@ class LlamaCppBackendTests(unittest.IsolatedAsyncioTestCase):
 
 class OpenRouterBackendTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_completion(self):
-        payload = _openai_response("remote answer", model=_FREE_MODEL)
-        backend = OpenRouterBackend(
-            "sk-test",
-            client=_async_client_with_response(payload),
-            _allowlist=_STUB_ALLOWLIST,
-        )
-        result = await backend.complete([{"role": "user", "content": "hi"}], _FREE_MODEL)
+        payload = _openai_response("remote answer", model="anthropic/claude-3-haiku")
+        backend = OpenRouterBackend("sk-test", client=_async_client_with_response(payload))
+        result = await backend.complete([{"role": "user", "content": "hi"}], "anthropic/claude-3-haiku")
         self.assertEqual(result.text, "remote answer")
         self.assertIsNone(result.error)
 
     async def test_http_error_returns_error_result(self):
         client = _async_client_with_response({"error": "unauthorized"}, status_code=401)
-        backend = OpenRouterBackend("bad-key", client=client, _allowlist=_STUB_ALLOWLIST)
-        result = await backend.complete([], _FREE_MODEL)
+        backend = OpenRouterBackend("bad-key", client=client)
+        result = await backend.complete([], "anthropic/claude-3-haiku")
         self.assertEqual(result.text, "")
         self.assertIsNotNone(result.error)
 
     async def test_transport_error_returns_error_result(self):
         client = MagicMock(spec=httpx.AsyncClient)
         client.post = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
-        backend = OpenRouterBackend("sk-test", client=client, _allowlist=_STUB_ALLOWLIST)
-        result = await backend.complete([], _FREE_MODEL)
+        backend = OpenRouterBackend("sk-test", client=client)
+        result = await backend.complete([], "anthropic/claude-3-haiku")
         self.assertIsNotNone(result.error)
+
+    async def test_disabled_raises_runtime_error(self):
+        backend = OpenRouterBackend(None)
+        with self.assertRaises(RuntimeError) as ctx:
+            await backend.complete([], "anthropic/claude-3-haiku")
+        self.assertIn("OPENROUTER_API_KEY", str(ctx.exception))
 
     async def test_url_hits_openrouter_endpoint(self):
         payload = _openai_response("ok")
         client = _async_client_with_response(payload)
-        backend = OpenRouterBackend("sk-test", client=client, _allowlist=_STUB_ALLOWLIST)
-        await backend.complete([], _FREE_MODEL)
+        backend = OpenRouterBackend("sk-test", client=client)
+        await backend.complete([], "anthropic/claude-3-haiku")
         posted_url = client.post.call_args.args[0]
         self.assertIn("openrouter.ai", posted_url)
+        self.assertIn("chat/completions", posted_url)
 
-
-class OpenRouterAllowlistTests(unittest.IsolatedAsyncioTestCase):
-    async def test_paid_model_raises_before_any_http_call(self):
-        client = MagicMock(spec=httpx.AsyncClient)
-        client.post = AsyncMock()
-        backend = OpenRouterBackend("sk-test", client=client, _allowlist=_STUB_ALLOWLIST)
-        with self.assertRaises(ValueError) as ctx:
-            await backend.complete([], _PAID_MODEL)
-        client.post.assert_not_called()
-        self.assertIn(_PAID_MODEL, str(ctx.exception))
-
-    async def test_free_suffix_model_is_accepted(self):
-        payload = _openai_response("ok", model=_FREE_MODEL)
-        backend = OpenRouterBackend(
-            "sk-test",
-            client=_async_client_with_response(payload),
-            _allowlist=_STUB_ALLOWLIST,
-        )
-        result = await backend.complete([], _FREE_MODEL)
-        self.assertIsNone(result.error)
-
-    async def test_allowlist_fetched_from_api_on_first_use(self):
-        models_response = {
-            "data": [
-                {"id": "vendor/model-a:free", "pricing": {"prompt": "0", "completion": "0"}},
-                {"id": "vendor/model-b", "pricing": {"prompt": "0.001", "completion": "0.002"}},
-            ]
-        }
-        completion_response = _openai_response("hi", model="vendor/model-a:free")
-        client = MagicMock(spec=httpx.AsyncClient)
-        client.get = AsyncMock(return_value=_mock_httpx_response(models_response))
-        client.post = AsyncMock(return_value=_mock_httpx_response(completion_response))
+    async def test_passes_kwargs_in_payload(self):
+        payload = _openai_response("ok")
+        client = _async_client_with_response(payload)
         backend = OpenRouterBackend("sk-test", client=client)
-        await backend.complete([], "vendor/model-a:free")
-        client.get.assert_called_once()
+        await backend.complete([], "m", temperature=0.3, max_tokens=256)
+        body = client.post.call_args.kwargs["json"]
+        self.assertEqual(body["temperature"], 0.3)
+        self.assertEqual(body["max_tokens"], 256)
 
-    async def test_allowlist_fetch_failure_falls_back_to_hardcoded(self):
-        client = MagicMock(spec=httpx.AsyncClient)
-        client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
-        payload = _openai_response("ok", model=next(iter(_FREE_TIER_FALLBACK)))
-        client.post = AsyncMock(return_value=_mock_httpx_response(payload))
-        backend = OpenRouterBackend("sk-test", client=client)
-        fallback_model = next(iter(_FREE_TIER_FALLBACK))
-        result = await backend.complete([], fallback_model)
-        self.assertIsNone(result.error)
+    async def test_api_key_stored_on_backend(self):
+        backend = OpenRouterBackend("sk-or-v1-abc123")
+        self.assertEqual(backend._api_key, "sk-or-v1-abc123")
+        self.assertFalse(backend._disabled)
 
-    async def test_paid_model_rejected_even_after_fetch_failure(self):
-        client = MagicMock(spec=httpx.AsyncClient)
-        client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
-        client.post = AsyncMock()
-        backend = OpenRouterBackend("sk-test", client=client)
-        with self.assertRaises(ValueError):
-            await backend.complete([], _PAID_MODEL)
-
-    async def test_allowlist_not_refetched_within_ttl(self):
-        models_response = {"data": [{"id": _FREE_MODEL, "pricing": {"prompt": "0", "completion": "0"}}]}
-        payload = _openai_response("ok", model=_FREE_MODEL)
-        client = MagicMock(spec=httpx.AsyncClient)
-        client.get = AsyncMock(return_value=_mock_httpx_response(models_response))
-        client.post = AsyncMock(return_value=_mock_httpx_response(payload))
-        backend = OpenRouterBackend("sk-test", client=client)
-        await backend.complete([], _FREE_MODEL)
-        await backend.complete([], _FREE_MODEL)
-        self.assertEqual(client.get.call_count, 1)
-
-
-class IsFreeModelTests(unittest.TestCase):
-    def test_free_suffix_is_free(self):
-        self.assertTrue(_is_free_model({"id": "vendor/model:free", "pricing": {"prompt": "0.001", "completion": "0.001"}}))
-
-    def test_zero_pricing_is_free(self):
-        self.assertTrue(_is_free_model({"id": "vendor/model", "pricing": {"prompt": "0", "completion": "0"}}))
-
-    def test_paid_pricing_is_not_free(self):
-        self.assertFalse(_is_free_model({"id": "vendor/model", "pricing": {"prompt": "0.001", "completion": "0.002"}}))
-
-    def test_partial_zero_pricing_is_not_free(self):
-        self.assertFalse(_is_free_model({"id": "vendor/model", "pricing": {"prompt": "0", "completion": "0.001"}}))
+    def test_stream_sync_disabled_raises(self):
+        backend = OpenRouterBackend(None)
+        with self.assertRaises(RuntimeError):
+            with backend.stream_sync([], "m"):
+                pass
 
 
 class ModelClientRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -316,6 +264,29 @@ class ModelClientRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["temperature"], 0.7)
         self.assertEqual(kwargs["max_tokens"], 512)
 
+    def test_stream_sync_local_routes_to_llama(self):
+        client, llama, _ = self._make_client()
+        llama.stream_sync = MagicMock()
+        llama.stream_sync.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        llama.stream_sync.return_value.__exit__ = MagicMock(return_value=False)
+        with client.stream_sync([], "local:llama3.1"):
+            pass
+        llama.stream_sync.assert_called_once()
+
+    def test_stream_sync_openrouter_routes_to_openrouter(self):
+        client, _, openrouter = self._make_client()
+        openrouter.stream_sync = MagicMock()
+        openrouter.stream_sync.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        openrouter.stream_sync.return_value.__exit__ = MagicMock(return_value=False)
+        with client.stream_sync([], "openrouter:anthropic/claude-3-haiku"):
+            pass
+        openrouter.stream_sync.assert_called_once()
+
+    def test_complete_sync_only_supports_local(self):
+        client, _, _ = self._make_client()
+        with self.assertRaises(ValueError):
+            client.complete_sync([], "openrouter:anthropic/claude-3-haiku")
+
 
 class BuildModelClientSingletonTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -330,20 +301,23 @@ class BuildModelClientSingletonTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OPENROUTER_API_KEY", None)
             with patch("infra.config.get_model_url", return_value="http://localhost:8080"):
-                client = build_model_client()
+                with patch("infra.settings.get_openrouter_connection", return_value=None):
+                    client = build_model_client()
         self.assertIsNotNone(client)
 
     def test_returns_same_instance(self):
         with patch("infra.config.get_model_url", return_value="http://localhost:8080"):
-            a = build_model_client()
-            b = build_model_client()
+            with patch("infra.settings.get_openrouter_connection", return_value=None):
+                a = build_model_client()
+                b = build_model_client()
         self.assertIs(a, b)
 
     async def test_local_model_works_without_api_key(self):
         os.environ.pop("OPENROUTER_API_KEY", None)
         payload = _openai_response("hello", model="llama3")
         with patch("infra.config.get_model_url", return_value="http://localhost:8080"):
-            mc = build_model_client()
+            with patch("infra.settings.get_openrouter_connection", return_value=None):
+                mc = build_model_client()
         mc._llama._client = _async_client_with_response(payload)
         result = await mc.complete([{"role": "user", "content": "hi"}], "local:llama3")
         self.assertEqual(result.text, "hello")
@@ -352,7 +326,8 @@ class BuildModelClientSingletonTests(unittest.IsolatedAsyncioTestCase):
     async def test_openrouter_raises_without_api_key(self):
         os.environ.pop("OPENROUTER_API_KEY", None)
         with patch("infra.config.get_model_url", return_value="http://localhost:8080"):
-            mc = build_model_client()
+            with patch("infra.settings.get_openrouter_connection", return_value=None):
+                mc = build_model_client()
         with self.assertRaises(RuntimeError) as ctx:
-            await mc.complete([], "openrouter:google/gemma:free")
+            await mc.complete([], "openrouter:anthropic/claude-3-haiku")
         self.assertIn("OPENROUTER_API_KEY", str(ctx.exception))

@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import threading
-import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,20 +15,6 @@ _log = logging.getLogger(__name__)
 _OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_TIMEOUT = 900.0
-_ALLOWLIST_TTL_S = 24 * 3600
-
-# Conservative fallback used when the OpenRouter /models fetch fails at startup.
-_FREE_TIER_FALLBACK: frozenset[str] = frozenset(
-    {
-        "google/gemma-3n-e4b-it:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "meta-llama/llama-3.2-3b-instruct:free",
-        "microsoft/phi-3-mini-128k-instruct:free",
-        "mistralai/mistral-7b-instruct:free",
-        "nousresearch/hermes-3-llama-3.1-405b:free",
-        "qwen/qwen-2-7b-instruct:free",
-    }
-)
 
 
 @dataclass
@@ -130,18 +115,14 @@ class OpenRouterBackend:
         base_url: str = _OPENROUTER_BASE_URL,
         *,
         client: httpx.AsyncClient | None = None,
-        # Inject a fixed allowlist to skip the fetch entirely (tests only).
-        _allowlist: frozenset[str] | None = None,
+        sync_client: httpx.Client | None = None,
     ) -> None:
         self._disabled = not api_key
         self._api_key = api_key or ""
         self._base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {self._api_key}"} if api_key else {}
         self._client = client or httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, headers=headers)
-        self._allowlist: frozenset[str] = _allowlist or frozenset()
-        # Far-future sentinel means "never refetch" when injected; 0 means "fetch on first use".
-        self._allowlist_fetched_at: float = float("inf") if _allowlist is not None else 0.0
-        self._allowlist_lock: asyncio.Lock = asyncio.Lock()
+        self._sync_client = sync_client or httpx.Client(timeout=_DEFAULT_TIMEOUT, headers=headers)
 
     async def complete(
         self, messages: list[dict], model: str, **kwargs: object
@@ -149,12 +130,6 @@ class OpenRouterBackend:
         if self._disabled:
             raise RuntimeError(
                 f"OpenRouter model requested but {_OPENROUTER_API_KEY_ENV} env var is not set"
-            )
-        await self._ensure_allowlist()
-        if model not in self._allowlist:
-            raise ValueError(
-                f"model {model!r} is not on the OpenRouter free tier; "
-                f"use a ':free' model or one priced at $0 for prompt and completion"
             )
         payload = {"model": model, "messages": messages, **kwargs}
         url = f"{self._base_url}/chat/completions"
@@ -175,32 +150,23 @@ class OpenRouterBackend:
             )
         return _parse_openai_response(r.json(), model)
 
-    async def _ensure_allowlist(self) -> None:
-        if time.monotonic() - self._allowlist_fetched_at < _ALLOWLIST_TTL_S:
-            return
-        async with self._allowlist_lock:
-            if time.monotonic() - self._allowlist_fetched_at < _ALLOWLIST_TTL_S:
-                return  # another coroutine refreshed while we waited
-            fetched = await self._fetch_allowlist()
-            self._allowlist = fetched
-            self._allowlist_fetched_at = time.monotonic()
+    @contextmanager
+    def stream_sync(
+        self, messages: list[dict], model: str, **kwargs: object
+    ) -> Generator[httpx.Response, None, None]:
+        if self._disabled:
+            raise RuntimeError(
+                f"OpenRouter model requested but {_OPENROUTER_API_KEY_ENV} env var is not set"
+            )
+        url = f"{self._base_url}/chat/completions"
+        payload = {"model": model, "messages": messages, "stream": True, **kwargs}
+        with self._sync_client.stream("POST", url, json=payload) as response:
+            response.raise_for_status()
+            yield response
 
     async def aclose(self) -> None:
         await self._client.aclose()
-
-    async def _fetch_allowlist(self) -> frozenset[str]:
-        try:
-            r = await self._client.get(f"{self._base_url}/models")
-            r.raise_for_status()
-            models: list[dict] = r.json().get("data") or []
-            result = frozenset(m["id"] for m in models if _is_free_model(m))
-            _log.info("openrouter allowlist refreshed  count=%d", len(result))
-            return result
-        except Exception as exc:
-            _log.warning(
-                "openrouter allowlist fetch failed (%s); using hardcoded fallback", exc
-            )
-            return _FREE_TIER_FALLBACK
+        self._sync_client.close()
 
 
 class ModelClient:
@@ -236,8 +202,12 @@ class ModelClient:
             with self._llama.stream_sync(messages, model[len("local:"):], **kwargs) as resp:
                 yield resp
             return
+        if model.startswith("openrouter:"):
+            with self._openrouter.stream_sync(messages, model[len("openrouter:"):], **kwargs) as resp:
+                yield resp
+            return
         raise ValueError(
-            f"stream_sync only supports 'local:' models; got {model!r}"
+            f"stream_sync unrecognised model prefix in {model!r}; expected 'local:' or 'openrouter:'"
         )
 
     async def aclose(self) -> None:
@@ -293,13 +263,6 @@ async def close_model_client() -> None:
         return
     await _instance.aclose()
     _instance = None
-
-
-def _is_free_model(model_data: dict) -> bool:
-    if str(model_data.get("id", "")).endswith(":free"):
-        return True
-    pricing = model_data.get("pricing") or {}
-    return str(pricing.get("prompt", "1")) == "0" and str(pricing.get("completion", "1")) == "0"
 
 
 def _parse_openai_response(data: dict, requested_model: str) -> CompletionResult:

@@ -7,6 +7,21 @@ from typing import Callable
 _log = logging.getLogger(__name__)
 
 
+def _resolve_model_prefix(model: str) -> str:
+    """Return 'openrouter:{model}' if model is in the user's allowlist, else 'local:{model}'."""
+    try:
+        from infra.settings import get_openrouter_connection
+        conn = get_openrouter_connection()
+        if conn:
+            allowed = frozenset(conn.get("allowed_models") or [])
+            if model in allowed:
+                _log.info("stream_model_response routing  model=%s  backend=openrouter", model)
+                return f"openrouter:{model}"
+    except Exception:
+        _log.debug("openrouter allowlist check failed  model=%s", model, exc_info=True)
+    return f"local:{model}"
+
+
 def stream_model_response(
     model: str,
     messages: list[dict],
@@ -38,7 +53,7 @@ def stream_model_response(
 
     with mc.stream_sync(
         messages=messages,
-        model=f"local:{model}",
+        model=_resolve_model_prefix(model),
         temperature=temperature,
         max_tokens=max_tokens,
         stream_options={"include_usage": True},

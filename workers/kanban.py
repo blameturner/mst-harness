@@ -192,6 +192,14 @@ async def _execute(db: NocodbClient, task: dict) -> None:
     retry_count = int(task.get("retry_count") or 0)
     entry = _registry.get(task_type)
 
+    raw_payload = task.get("input_payload")
+    if isinstance(raw_payload, str):
+        import json as _json
+        try:
+            task = {**task, "input_payload": _json.loads(raw_payload)}
+        except _json.JSONDecodeError:
+            task = {**task, "input_payload": {}}
+
     if entry is None:
         _log.error("kanban no handler  task_type=%s  row_id=%s", task_type, row_id)
         await asyncio.to_thread(_mark_failed, db, row_id, f"no handler for '{task_type}'")
