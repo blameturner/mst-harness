@@ -92,6 +92,15 @@ def patch_config_section(section: str, payload: ConfigOverridePayload):
         raise HTTPException(404, f"Section '{section}' not found in config.json")
     for key, value in payload.values.items():
         _settings.set_config_override(section, key, value)
+    # Apply any model-level overrides to the live PLATFORM registry so
+    # get_function_config() picks them up without a server restart.
+    section_overrides = _settings.get_config_overrides_all().get(section) or {}
+    nested_models = section_overrides.get("models")
+    if isinstance(nested_models, dict):
+        live: dict = PLATFORM.setdefault("models", {})
+        for fn_name, fn_cfg in nested_models.items():
+            if isinstance(fn_cfg, dict):
+                live[fn_name] = {**(live.get(fn_name) or {}), **fn_cfg}
     return {"ok": True, "section": section, "updated": list(payload.values.keys())}
 
 
@@ -115,7 +124,7 @@ def delete_config_override(section: str, key: str):
 _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Private IP ranges that must never be targeted by user-supplied base_url (SSRF).
-_SSRF_BLOCKED_PREFIXES = ("127.", "10.", "192.168.", "169.254.", "::1", "0.")
+_SSRF_BLOCKED_PREFIXES = ("127.", "10.", "192.168.", "169.254.", "::1", "0.", "localhost")
 
 
 class OpenRouterConnectionPayload(BaseModel):

@@ -56,7 +56,7 @@ def _run(payload: dict) -> dict:
             existing_modules=existing_modules,
         )
 
-        row = upsert_curriculum(db, org_id, topic, root_goal, modules, curriculum_id)
+        row = upsert_curriculum(db, org_id, topic, root_goal, modules, curriculum_id, status="ready")
         row_id = int(row.get("Id") or 0)
         if not row_id:
             return {"status": "failed", "error": "curriculum upsert did not return a row Id — table may not exist"}

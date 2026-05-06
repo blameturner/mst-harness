@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 _log = logging.getLogger("teaching.db")
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
 def get_learner_concepts(db, org_id: int, topic: str) -> list[dict]:
     return db._safe_list(
         "learner_concepts",
@@ -31,7 +35,7 @@ def upsert_learner_concept(
     misconceptions: str | None = None,
     preferred_style: str | None = None,
 ) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = _now()
     existing = db._safe_get(
         "learner_concepts",
         f"(org_id,eq,{org_id})~and(topic,eq,{topic})~and(concept,eq,{concept})",
@@ -74,13 +78,15 @@ def upsert_curriculum(
     root_goal: str | None,
     modules: list[dict],
     curriculum_id: int | None = None,
+    status: str = "ready",
 ) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
+    now = _now()
     payload: dict = {
         "org_id": org_id,
         "topic": topic,
         "modules": _json.dumps(modules, ensure_ascii=False),
         "updated_at": now,
+        "status": status,
     }
     if root_goal:
         payload["root_goal"] = root_goal

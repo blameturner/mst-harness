@@ -130,7 +130,7 @@ def get_all_settings() -> dict:
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
             if agent == SYSTEM_AGENT:
                 system = data
-            elif agent != CONFIG_AGENT:
+            elif agent not in (CONFIG_AGENT, OPENROUTER_AGENT):
                 agents[agent] = data
         return {"agents": agents, "system": system}
     except Exception:

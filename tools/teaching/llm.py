@@ -53,14 +53,21 @@ def generate_curriculum_modules(
         f'depth must be "introductory", "working", or "deep".\n'
         f'Order modules from foundational to advanced. Return ONLY the JSON object.'
     )
-    text, _ = model_call("teaching_curriculum", prompt)
-    if not text:
-        raise RuntimeError("teaching_curriculum LLM call returned empty text")
-    parsed = _parse_json_object(text)
-    modules = parsed.get("modules") or []
-    if not isinstance(modules, list):
-        raise ValueError(f"teaching_curriculum LLM returned unexpected shape: {list(parsed.keys())}")
-    return modules
+    for attempt in range(2):
+        text, _ = model_call("teaching_curriculum", prompt)
+        if not text:
+            continue
+        try:
+            parsed = _parse_json_object(text)
+            modules = parsed.get("modules") or []
+            if isinstance(modules, list) and modules:
+                return modules
+        except (ValueError, json.JSONDecodeError):
+            _log.warning("teaching_curriculum parse failed (attempt %d/2), trying salvage", attempt + 1)
+        modules = _salvage_list(text, "modules")
+        if modules:
+            return modules
+    raise RuntimeError("teaching_curriculum LLM failed to return modules after 2 attempts")
 
 
 def generate_lesson(
@@ -128,14 +135,21 @@ def generate_checks(
         f'Return a JSON object with a "checks" array. Each element:\n{_CHECK_SCHEMA}\n'
         f'Return ONLY the JSON object.'
     )
-    text, _ = model_call("teaching_check", prompt)
-    if not text:
-        raise RuntimeError("teaching_check LLM call returned empty text")
-    parsed = _parse_json_object(text)
-    checks = parsed.get("checks") or []
-    if not isinstance(checks, list):
-        raise ValueError("teaching_check LLM returned unexpected shape")
-    return checks
+    for attempt in range(2):
+        text, _ = model_call("teaching_check", prompt)
+        if not text:
+            continue
+        try:
+            parsed = _parse_json_object(text)
+            checks = parsed.get("checks") or []
+            if isinstance(checks, list) and checks:
+                return checks
+        except (ValueError, json.JSONDecodeError):
+            _log.warning("teaching_check parse failed (attempt %d/2), trying salvage", attempt + 1)
+        checks = _salvage_list(text, "checks")
+        if checks:
+            return checks
+    raise RuntimeError("teaching_check LLM failed to return checks after 2 attempts")
 
 
 # ── internal helpers ─────────────────────────────────────────────────────────
@@ -167,6 +181,42 @@ def _generate_lesson_meta(lesson_markdown: str) -> tuple[str, str, list[dict]]:
         return "", "", []
 
 
+def _salvage_list(raw: str, key: str) -> list:
+    """Extract a named JSON array from malformed model output."""
+    s = _strip_fence(raw)
+    s = s.replace("“", '"').replace("”", '"')
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+    m = re.search(rf'"{key}"\s*:\s*\[', s, re.IGNORECASE)
+    if not m:
+        return []
+    start = m.end()  # right after the opening [
+    depth = 1
+    in_str = False
+    escape = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(s[start - 1:i + 1])
+                except json.JSONDecodeError:
+                    return []
+    return []
+
+
 def _strip_fence(raw: str) -> str:
     s = raw.strip()
     if s.startswith("```"):
@@ -177,10 +227,11 @@ def _strip_fence(raw: str) -> str:
 
 def _parse_json_object(raw: str) -> dict:
     s = _strip_fence(raw)
+    s = s.replace(""", '"').replace(""", '"')
+    s = re.sub(r",\s*([}\]])", r"\1", s)
     start = s.find("{")
     if start < 0:
         raise ValueError("no JSON object found in LLM output")
-    # find balanced closing brace
     depth = 0
     in_str = False
     escape = False

@@ -209,13 +209,13 @@ async def _execute(db: NocodbClient, task: dict) -> None:
         _log.info("kanban done  row_id=%s  task_type=%s", row_id, task_type)
     except Exception as exc:
         if isinstance(exc, TaskNotReady):
-            not_before = (datetime.now(timezone.utc) + timedelta(seconds=exc.delay_seconds)).isoformat()
+            not_before = _iso_future(exc.delay_seconds)
             await asyncio.to_thread(_requeue_with_delay, db, row_id, not_before, str(exc))
             _log.info("kanban task-not-ready  row_id=%s  delay=%ds  reason=%s",
                       row_id, exc.delay_seconds, exc)
             return
         if AutonomyBackoff is not None and isinstance(exc, AutonomyBackoff):
-            not_before = (datetime.now(timezone.utc) + timedelta(seconds=exc.delay_seconds)).isoformat()
+            not_before = _iso_future(exc.delay_seconds)
             await asyncio.to_thread(_requeue_with_delay, db, row_id, not_before, str(exc))
             _log.info("kanban autonomy-backoff  row_id=%s  delay=%ds", row_id, exc.delay_seconds)
             return
@@ -229,7 +229,7 @@ async def _execute(db: NocodbClient, task: dict) -> None:
             await asyncio.to_thread(_mark_failed, db, row_id, str(exc))
         else:
             delay = 2 ** retry_count
-            not_before = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            not_before = _iso_future(delay)
             await asyncio.to_thread(_mark_retry, db, row_id, retry_count + 1, not_before)
 
 
@@ -267,7 +267,11 @@ def _requeue_with_delay(db: NocodbClient, row_id: int, not_before: str, reason: 
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _iso_future(seconds: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).replace(tzinfo=None).isoformat()
 
 
 def _chat_active() -> bool:

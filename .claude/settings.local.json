@@ -9,7 +9,9 @@
       "Bash(wc -l workers/web_search.py workers/search/*.py)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Read(//Users/michaelturner/WebstormProjects/JeffGPT-gw-ui/**)",
+      "Bash(npm run *)"
     ]
   }
 }

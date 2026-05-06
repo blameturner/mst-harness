@@ -163,6 +163,7 @@ def get_curriculum(curriculum_id: int):
         "root_goal": row.get("root_goal"),
         "modules": _parse_json(row.get("modules"), []),
         "current_module_index": row.get("current_module_index"),
+        "status": row.get("status") or "ready",
         "updated_at": row.get("updated_at") or row.get("UpdatedAt"),
     }
 
@@ -170,14 +171,34 @@ def get_curriculum(curriculum_id: int):
 @router.post("/curricula")
 def create_curriculum(body: CurriculumCreate):
     from infra.nocodb_client import NocodbClient
+    from workers import kanban
     client = NocodbClient()
-    payload = body.model_dump()
-    return _submit_task(
-        client,
-        "teaching_curriculum",
-        payload,
-        agent=f"teaching:{body.org_id}",
-    )
+
+    curriculum_id = body.curriculum_id
+    if not curriculum_id:
+        try:
+            stub = client._safe_post(CURRICULA_TABLE, {
+                "org_id": body.org_id,
+                "topic": body.topic,
+                "root_goal": body.root_goal or "",
+                "modules": "[]",
+                "current_module_index": 0,
+                "status": "pending",
+            })
+            curriculum_id = int((stub or {}).get("Id") or 0) or None
+        except Exception as e:
+            _log.warning("curricula stub create failed: %s", e)
+
+    payload = {**body.model_dump(), "curriculum_id": curriculum_id}
+    try:
+        task_id = kanban.submit(client, "teaching_curriculum", payload, created_by="api", agent=f"teaching:{body.org_id}")
+    except Exception as e:
+        _log.error("submit teaching_curriculum error: %s", e)
+        raise HTTPException(502, str(e))
+
+    if curriculum_id:
+        return {"id": str(curriculum_id), "task_id": str(task_id), "status": "pending", "task_type": "teaching_curriculum"}
+    return {"id": str(task_id), "task_id": str(task_id), "status": "pending", "task_type": "teaching_curriculum"}
 
 
 @router.get("/curricula/{curriculum_id}/lessons")
