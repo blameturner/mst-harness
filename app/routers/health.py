@@ -3,9 +3,9 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from infra.config import MODELS, refresh_models
-from infra.settings import get_openrouter_connection
-from workers.chat.config import CHAT_DEFAULT_STYLE, list_chat_styles
-from workers.code.config import CODE_DEFAULT_MODE, CODE_DEFAULT_STYLE, list_code_modes, list_code_styles
+from infra.settings import get_openrouter_connection, get_system_setting
+from workers.chat.config import CHAT_DEFAULT_MODEL, CHAT_DEFAULT_STYLE, list_chat_styles
+from workers.code.config import CODE_DEFAULT_MODEL, CODE_DEFAULT_MODE, CODE_DEFAULT_STYLE, list_code_modes, list_code_styles
 
 _log = logging.getLogger("main.health")
 
@@ -53,8 +53,13 @@ def list_models():
                 "role": "openrouter",
                 "model_id": model_id,
                 "url": None,
+                "is_free": model_id.endswith(":free"),
             })
-    return {"models": models}
+    defaults = {
+        "chat": get_system_setting("default_chat_model") or CHAT_DEFAULT_MODEL,
+        "code": get_system_setting("default_code_model") or CODE_DEFAULT_MODEL,
+    }
+    return {"models": models, "defaults": defaults}
 
 
 @router.get("/styles")

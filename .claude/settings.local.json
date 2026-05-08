@@ -13,7 +13,9 @@
       "Read(//Users/michaelturner/WebstormProjects/JeffGPT-gw-ui/**)",
       "Bash(npm run *)",
       "WebFetch(domain:openrouter.ai)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Read(//Users/michaelturner/PycharmProjects/mst-harness/app/routers/**)",
+      "Read(//Users/michaelturner/PycharmProjects/mst-harness/app/**)"
     ]
   }
 }

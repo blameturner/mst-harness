@@ -148,8 +148,8 @@ def _do_revise(gitea, owner, repo_name, pr_id, db, task, payload, result, revisi
 
     try:
         gitea.close_pr(owner, repo_name, pr_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning("project_review: close_pr failed  pr=%d  err=%s", pr_id, exc)
 
     child_id = _kanban.submit(
         db, "project_feature", new_payload,

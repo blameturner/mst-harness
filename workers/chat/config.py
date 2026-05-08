@@ -158,6 +158,7 @@ CHAT_STYLES: dict[str, str] = {
     ),
 }
 
+CHAT_DEFAULT_MODEL = "chat"
 CHAT_DEFAULT_STYLE = "companion"
 
 CHAT_STYLE_META: dict[str, dict[str, str]] = {

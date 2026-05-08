@@ -8,6 +8,30 @@ log.setup()
 _log = log.get("harness")
 
 
+def _seed_model_defaults() -> None:
+    """Write code-level defaults into __system__ settings on first boot.
+
+    Skips any key already set so manual overrides are never clobbered.
+    """
+    try:
+        from infra.settings import get_system_setting, set_system_setting
+        from workers.chat.config import CHAT_DEFAULT_MODEL
+        from workers.code.config import CODE_DEFAULT_MODEL
+        seeds = {
+            "default_chat_model": CHAT_DEFAULT_MODEL,
+            "default_code_model": CODE_DEFAULT_MODEL,
+        }
+        seeded = []
+        for key, value in seeds.items():
+            if value and get_system_setting(key) is None:
+                set_system_setting(key, value)
+                seeded.append(key)
+        if seeded:
+            _log.info("seeded model defaults  keys=%s", seeded)
+    except Exception:
+        _log.warning("model default seeding failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _log.info("mstag-harness starting")
@@ -267,6 +291,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         _log.error("enrichment dispatcher registration failed", exc_info=True)
 
+    _seed_model_defaults()
     _log.info("ready")
     try:
         yield

@@ -11,6 +11,7 @@ CODE_MODES: dict[str, str] = {
     "execute": "Alias of apply.",
 }
 
+CODE_DEFAULT_MODEL = "code"
 CODE_DEFAULT_MODE = "plan"
 
 CODE_MODE_META: dict[str, dict[str, str]] = {

@@ -29,6 +29,11 @@ class SystemSettingsPayload(BaseModel):
     fallback_model: str | None = None
 
 
+class ModelDefaultsPayload(BaseModel):
+    chat: str | None = None
+    code: str | None = None
+
+
 class ConfigOverridePayload(BaseModel):
     values: dict[str, Any]
 
@@ -67,6 +72,29 @@ def patch_system(payload: SystemSettingsPayload):
     for key, value in updates.items():
         _settings.set_system_setting(key, value)
     return {"ok": True, "updated": list(updates.keys())}
+
+
+@router.get("/defaults")
+def get_model_defaults():
+    from workers.chat.config import CHAT_DEFAULT_MODEL
+    from workers.code.config import CODE_DEFAULT_MODEL
+    return {
+        "chat": _settings.get_system_setting("default_chat_model") or CHAT_DEFAULT_MODEL,
+        "code": _settings.get_system_setting("default_code_model") or CODE_DEFAULT_MODEL,
+    }
+
+
+@router.patch("/defaults")
+def patch_model_defaults(payload: ModelDefaultsPayload):
+    updates = payload.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(422, "No fields provided")
+    if "chat" in updates:
+        _settings.set_system_setting("default_chat_model", updates["chat"])
+    if "code" in updates:
+        _settings.set_system_setting("default_code_model", updates["code"])
+    _log.info("model defaults updated  %s", updates)
+    return {"ok": True, "updated": updates}
 
 
 @router.get("/config")
@@ -210,8 +238,15 @@ async def list_openrouter_models():
                 {"id": m["id"], "is_free": m.get("pricing", {}).get("prompt") == "0"}
                 for m in data if isinstance(m, dict) and m.get("id")
             ]
+            categories: dict[str, dict] = {}
+            for m in models:
+                provider = m["id"].split("/")[0] if "/" in m["id"] else "other"
+                cat = categories.setdefault(provider, {"total": 0, "free": 0})
+                cat["total"] += 1
+                if m["is_free"]:
+                    cat["free"] += 1
             _log.info("openrouter models listed  count=%d  allowed=%d", len(models), len(allowed))
-            return {"models": models, "allowed": allowed, "enabled": True}
+            return {"models": models, "allowed": allowed, "enabled": True, "categories": categories}
     except Exception as exc:
         _log.warning("openrouter models fetch failed  err=%s", exc)
         return {"models": [], "allowed": allowed, "enabled": True, "fallback": True}

@@ -8,6 +8,7 @@ from typing import Callable, Iterator
 
 from infra.config import MODELS, refresh_models, resolve_model_entry
 from infra.nocodb_client import NocodbClient
+from infra.settings import get_openrouter_connection
 
 _log = logging.getLogger("agent.base")
 
@@ -41,17 +42,28 @@ class ChatResult:
 
 class BaseAgent:
     def __init__(self, model: str, org_id: int, search_enabled: bool = False):
-        entry = resolve_model_entry(model)
-        if not entry:
-            refresh_models()
+        if model.startswith("openrouter:"):
+            model_id = model[len("openrouter:"):]
+            conn = get_openrouter_connection()
+            allowed = (conn.get("allowed_models") or []) if conn else []
+            if model_id not in allowed:
+                raise ValueError(
+                    f"OpenRouter model '{model_id}' not in allowlist. "
+                    f"Allowed: {allowed}"
+                )
+            entry: dict = {"role": model, "model_id": model, "url": ""}
+        else:
             entry = resolve_model_entry(model)
-        if not entry:
-            options = sorted({
-                v["role"] for v in MODELS.values() if isinstance(v, dict)
-            })
-            raise ValueError(
-                f"Model '{model}' not available. Options: {options}"
-            )
+            if not entry:
+                refresh_models()
+                entry = resolve_model_entry(model)
+            if not entry:
+                options = sorted({
+                    v["role"] for v in MODELS.values() if isinstance(v, dict)
+                })
+                raise ValueError(
+                    f"Model '{model}' not available. Options: {options}"
+                )
         self.model = str(entry.get("model_id") or entry.get("role") or model)
         self.model_key = model
         self.org_id = org_id

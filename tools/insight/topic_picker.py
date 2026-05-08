@@ -99,10 +99,26 @@ def _recent_covered(payload: RecallPayload, client) -> set[str]:
 
 
 def _recent_covered_by_org(org_id: int) -> set[str]:
+    """Topics covered by an insight in the last RECENT_INSIGHT_DAYS window.
+
+    Uses a date filter so topics from old insights don't permanently block
+    re-coverage once the window expires.
+    """
     covered: set[str] = set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_RECENT_INSIGHT_DAYS)).isoformat()
     try:
         from shared import insights as insights_mod
-        rows = insights_mod.list_recent(org_id, limit=30)
+        from infra.nocodb_client import NocodbClient
+        client = NocodbClient()
+        rows = client._get_paginated(insights_mod.INSIGHTS_TABLE, params={
+            "where": (
+                f"(org_id,eq,{org_id})"
+                f"~and(status,eq,{insights_mod.STATUS_PUBLISHED})"
+                f"~and(CreatedAt,gte,{cutoff})"
+            ),
+            "sort": "-CreatedAt",
+            "limit": 50,
+        })
     except Exception:
         rows = []
     for r in rows:
@@ -147,7 +163,15 @@ def _candidates_from_recall(payload: RecallPayload) -> list[dict]:
         title = (t.title or "").strip()
         # Title often is a topic phrase already
         if title:
-            related = [w.get("phrase", "") for w in payload.warm_topics[:5] if w.get("phrase")]
+            # Only include warm topics as related if they share a word with the thread
+            # title — avoids forcing unrelated topics into the synthesis.
+            title_words = {w.lower() for w in title.split() if len(w) > 3}
+            related = [
+                w.get("phrase", "") for w in payload.warm_topics[:10]
+                if w.get("phrase") and any(
+                    word in w["phrase"].lower() for word in title_words
+                )
+            ][:4]
             _add(
                 title,
                 score=10.0 + min(t.msgs_24h, 20) * 0.2,

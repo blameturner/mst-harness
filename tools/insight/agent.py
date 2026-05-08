@@ -48,50 +48,54 @@ def _note_backoff(org_id: int, status: str) -> None:
         _log.debug("note_producer_result failed", exc_info=True)
 
 
-_SYNTHESIS_PROMPT = """You are writing a long-form research briefing for the user's home dashboard. The user has been idle and asked the system to go deeper on the topics they've been working on. Deliver a genuinely useful document — not a summary of summaries, not "did you know" trivia.
+_SYNTHESIS_PROMPT = """You are writing an analysis briefing for the user's home dashboard. You have access to excerpts from their own knowledge base — past conversations, research, and notes. Your job is NOT to summarise what they already know. Your job is to surface what they haven't yet seen clearly:
+
+- Patterns across multiple threads they haven't named
+- Tensions or tradeoffs they're navigating without resolving
+- A gap in their current picture that would change their approach
+- A decision they're circling but haven't framed
 
 TOPIC: {topic}
 ANGLE: {angle}
 WHY THIS TOPIC WAS CHOSEN: {rationale}
-RELATED ENTITIES (contrast against these where relevant): {related_entities}
+RELATED CONTEXT (only use if source material links these to the topic — do NOT force connections): {related_entities}
 
-SOURCE MATERIAL (verbatim excerpts from the user's own knowledge base and prior research):
+SOURCE MATERIAL (excerpts from the user's knowledge base):
 
 {material}
 
 WRITE THE BRIEFING AS MARKDOWN. Required structure:
 
-1. `# <title>` — a specific, useful title. NOT "{topic}" verbatim — a title that promises value (e.g. "Duck Creek in the 2026 P&C Core Platform Landscape").
-2. `## The short version` — 3-5 sentences of prose. Lead with the single most useful takeaway. Name 2-3 comparison points that matter. End with a concrete "what this means for you" sentence.
-3. `## Context — why this matters now` — one paragraph grounding the topic in the user's recent activity using the rationale above. Do not just repeat the rationale verbatim.
-4. `## The landscape` — 2-4 paragraphs of synthesis. Contrast alternatives, cite named competitors/approaches, surface tradeoffs. Inline citations for concrete factual claims: `[source: <url or filename or graph>]`.
-5. `## What's new or moving` — 1-2 paragraphs focused on recent developments, direction of travel, momentum. If the source material doesn't cover recency, say so explicitly in one sentence and move on — do NOT fabricate.
-6. `## Practical angles` — 2-4 paragraphs tied to the user's apparent use case. What decisions does this inform? What hidden gotchas exist? Be opinionated where the evidence supports it.
-7. `## Open questions worth pushing on` — 3-6 bullet points, each a specific follow-up the user could usefully send the system (e.g. "Compare X's pricing model to Y's at enterprise tier"). This is where bullets ARE allowed.
-8. `## Sources` — deduped bulleted list of every URL cited above. Include graph-derived facts as `graph: <relationship>`.
+1. `# <title>` — name the specific tension, gap, or insight — not just the topic. Bad: "Duck Creek Overview". Good: "Duck Creek's API Depth is the Make-or-Break Decision You Haven't Made".
+2. `## The bottom line` — 2-3 sentences of direct prose. State the single most important thing: a pattern, a gap, a decision. Do not restate the rationale.
+3. `## What the evidence shows` — 2-3 paragraphs synthesising the source material. What do the excerpts reveal when read together? What tension or pattern emerges? Inline citations: `[source: <url or filename or graph>]`. If most material comes from a single conversation, note this and work with what you have.
+4. `## The decision or gap` — 1-2 paragraphs. What specific decision point or knowledge gap does this surface? What would change for the user if they resolved it?
+5. `## Next steps worth taking` — 4-6 bullets. Each is a concrete, specific action: a question to ask the system, a comparison to run, a decision to make. Phrase as imperatives ("Ask the system to compare…", "Decide whether…", "Research…").
+6. `## Sources` — deduped bulleted list of cited sources.
 
 HARD RULES:
-- Default to flowing prose. Bullets ONLY in `## Open questions worth pushing on` and `## Sources`.
-- Target 800-1500 words of body content. Shorter only if the material is genuinely thin (and say so explicitly).
-- Every concrete factual claim (numbers, names of competing products, dated events, prices) MUST carry an inline citation. General analysis and framing does NOT need one.
-- NEVER fabricate URLs, prices, dates, or features. If the material doesn't contain it, either omit or call out the gap.
-- Write for a technical, time-constrained reader. Compress. No filler, no "In conclusion", no "It is important to note".
-- Output raw markdown only — no JSON, no wrapping code fences.
+- Target 400-700 words. Tight and useful beats long and padded.
+- Only connect related entities to the topic if the source material actually links them. No invented connections.
+- No "What's new" section unless the material contains dated external facts — internal chat excerpts are not "industry news".
+- No fabrication of URLs, product features, prices, or events.
+- No generic AI/tech commentary the user didn't bring up themselves.
+- No filler phrases: "It is important to note", "In conclusion", "This analysis reveals".
+- Output raw markdown only.
 """
 
-_ACK_MESSAGE_PROMPT = """Write a 1-2 sentence note announcing a new insight briefing to the user on their home dashboard.
+_ACK_MESSAGE_PROMPT = """Write a 1-sentence note telling the user there's a new insight on their home dashboard.
 
-The briefing topic: {topic}
-Why it was picked: {rationale}
-The briefing's opening line: {lead}
+Topic: {topic}
+Why picked: {rationale}
+Opening line of the insight: {lead}
 
 Rules:
-- Reference the rationale naturally (e.g. "Since we've been discussing X, I pulled together…").
-- Mention the topic and that a full briefing is on their home dashboard.
-- No markdown, no bullet points, no "I hope you find this helpful".
-- ONE sentence preferred, two if it genuinely improves the message.
+- Reference the rationale briefly (e.g. "Since we've been deep in X…").
+- Name what the insight found — use the opening line as a hint.
+- No markdown, no bullet points, no "I hope you find this helpful", no "I've compiled".
+- One sentence only.
 
-Output only the note, nothing else."""
+Output only the sentence."""
 
 
 # ---- gathering source material ----------------------------------------------
