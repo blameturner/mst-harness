@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import logging
 import time
 import threading
@@ -434,37 +435,43 @@ class ChatAgent(BaseAgent):
         )
         _span("user_msg_persist_ms", _t)
 
+        # Run RAG collect, graph recall, and memory fetch in parallel — all independent I/O.
+        from shared.graph_recall import build_graph_context
+        from workers.chat.memory import get_pinned_for_prompt
+        memory_budget = int(convo.get("memory_token_budget") or 0) or None
+
         _t = time.perf_counter()
-        rag_context = collect_rag(rag_future, rag_executor)
-        _span("rag_retrieve_ms", _t)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _pool:
+            _rag_f = _pool.submit(collect_rag, rag_future, rag_executor)
+            _graph_f = _pool.submit(build_graph_context, self.org_id, user_message)
+            _mem_f = _pool.submit(
+                get_pinned_for_prompt,
+                conversation_id=conversation_id,
+                org_id=self.org_id,
+                token_budget=memory_budget,
+            )
+            try:
+                rag_context = _rag_f.result()
+            except Exception:
+                _log.warning("collect_rag failed  conv=%s", conversation_id, exc_info=True)
+                rag_context = ""
+            try:
+                graph_context = _graph_f.result()
+            except Exception:
+                _log.warning("graph_recall failed  conv=%s", conversation_id, exc_info=True)
+                graph_context = ""
+            try:
+                chat_memory_block = _mem_f.result()
+            except Exception:
+                _log.warning("chat conv=%s  memory fetch failed", conversation_id, exc_info=True)
+                chat_memory_block = ""
+        _span("context_gather_ms", _t)
 
         _t = time.perf_counter()
         history, summary_event = maybe_summarise(history, truncate_only=True)
         if summary_event:
             emit(summary_event)
         _span("summarise_ms", _t)
-
-        _t = time.perf_counter()
-        try:
-            from shared.graph_recall import build_graph_context
-            graph_context = build_graph_context(self.org_id, user_message)
-        except Exception:
-            _log.warning("graph_recall failed  conv=%s", conversation_id, exc_info=True)
-            graph_context = ""
-        _span("graph_recall_ms", _t)
-
-        _t = time.perf_counter()
-        try:
-            from workers.chat.memory import get_pinned_for_prompt
-            memory_budget = int(convo.get("memory_token_budget") or 0) or None
-            chat_memory_block = get_pinned_for_prompt(
-                conversation_id=conversation_id,
-                org_id=self.org_id,
-                token_budget=memory_budget,
-            )
-        except Exception:
-            _log.warning("chat conv=%s  memory fetch failed", conversation_id, exc_info=True)
-            chat_memory_block = ""
         system_note = (convo.get("system_note") or "").strip()
         payload = build_chat_payload(
             history=history,
