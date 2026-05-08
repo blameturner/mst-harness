@@ -43,7 +43,7 @@ async def handle(task: dict) -> dict:
 
 
 def _run(task: dict, payload: dict) -> dict:
-    from workers.project_autonomy import check_autonomy, _get_setting, _check_queue_depth
+    from workers.project_autonomy import check_autonomy, get_project_setting, check_queue_depth
     from infra.nocodb_client import NocodbClient
     from tools.project.knowledge import read_repo_summary
     from infra.config import resolve_model_entry
@@ -73,7 +73,7 @@ def _run(task: dict, payload: dict) -> dict:
         }
 
     try:
-        _check_queue_depth(db, project_id)
+        check_queue_depth(db, project_id)
     except Exception:
         return {"status": "done", "proposals": [], "queued": 0, "tokens_used": 0,
                 "note": "proposal queue full"}
@@ -108,7 +108,7 @@ def _run(task: dict, payload: dict) -> dict:
         _log.warning("propose parse failed  err=%s  raw=%s", exc, raw[:200])
         return {"status": "failed", "error": f"model returned non-JSON: {raw[:200]}"}
 
-    autonomy_mode = str(_get_setting(project_id, "autonomy_mode") or "proposal-only")
+    autonomy_mode = str(get_project_setting(project_id, "autonomy_mode") or "proposal-only")
     task_status = "ready" if autonomy_mode == "full" else "blocked"
 
     queued_proposals = []
@@ -166,7 +166,7 @@ def _gather_extra_context(db, project_id: int) -> list[str]:
                 lines = [f"- #{i.get('number')}: {i.get('title', '')}" for i in issues[:10]]
                 parts.append("## Open Issues\n" + "\n".join(lines))
     except Exception as exc:
-        _log.debug("extra context gather failed  err=%s", exc)
+        _log.warning("extra context gather failed  err=%s", exc)
     return parts
 
 

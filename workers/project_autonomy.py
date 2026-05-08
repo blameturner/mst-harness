@@ -66,6 +66,9 @@ def _get_setting(project_id: int, key: str) -> object:
     return get_feature("project", key, _DEFAULTS.get(key))
 
 
+get_project_setting = _get_setting
+
+
 def _set_halted(project_id: int, halted: bool) -> None:
     try:
         from infra.settings import set_agent_setting
@@ -90,6 +93,9 @@ def _check_queue_depth(db: NocodbClient, project_id: int) -> None:
         raise AutonomyBlock(
             f"proposal queue at limit ({limit}); no new proposals until the queue drains"
         )
+
+
+check_queue_depth = _check_queue_depth
 
 
 def _check_hourly_rate(db: NocodbClient, project_id: int) -> None:

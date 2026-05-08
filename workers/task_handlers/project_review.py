@@ -97,8 +97,8 @@ def _do_approve(gitea, owner, repo_name, pr_id, staging_branch, db, project_id, 
         from workers import kanban as _kanban
         _kanban.submit(db, "project_index", {"project_id": project_id, "trigger": "post_merge"},
                        created_by=f"project:{project_id}", agent=f"project:{project_id}")
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning("project_review: project_index enqueue failed  err=%s", exc)
 
     return {
         "status": "done",

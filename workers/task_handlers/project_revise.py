@@ -9,7 +9,8 @@ Input payload:
   branch_name: str
   feature_description: str
   architect_context: str | None
-  revision_count: int           — cycles completed so far
+  revision_count: int           — agent revision cycles completed so far
+  human_revision_count: int     — human annotation cycles completed so far
   changed_paths: list[str]
   human_feedback: str           — user annotation
 
@@ -72,6 +73,7 @@ def _run(task: dict, payload: dict) -> dict:
 
     changed_paths: list[str] = list(payload.get("changed_paths") or [])
     revision_count = int(payload.get("revision_count") or 0)
+    human_revision_count = int(payload.get("human_revision_count") or 0)
 
     db = NocodbClient()
     check_autonomy(db, task)
@@ -159,9 +161,9 @@ def _run(task: dict, payload: dict) -> dict:
     )
 
     base_payload = {k: payload[k] for k in payload if k != "human_feedback"}
-    base_payload["revision_count"] = revision_count + 1
+    base_payload["human_revision_count"] = human_revision_count + 1
 
-    if revision_count + 1 >= _MAX_REVISE_CYCLES:
+    if human_revision_count + 1 >= _MAX_REVISE_CYCLES:
         _kanban.submit(
             db, "project_review", base_payload,
             created_by=f"project:{project_id}",
@@ -181,7 +183,8 @@ def _run(task: dict, payload: dict) -> dict:
     return {
         "status": "done",
         "patched_paths": patched_paths,
-        "revision_count": revision_count + 1,
+        "revision_count": revision_count,
+        "human_revision_count": human_revision_count + 1,
         "tokens_used": approx_tokens,
         "next_action": next_action,
     }
