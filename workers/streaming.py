@@ -9,6 +9,8 @@ _log = logging.getLogger(__name__)
 
 def _resolve_model_prefix(model: str) -> str:
     """Return 'openrouter:{model}' if model is in the user's allowlist, else 'local:{model}'."""
+    if model.startswith(("local:", "openrouter:")):
+        return model
     try:
         from infra.settings import get_openrouter_connection
         conn = get_openrouter_connection()
