@@ -2,15 +2,14 @@ import json
 import logging
 import re
 import time
-import concurrent.futures as _futures
 
 from infra.config import get_feature
 from shared.models import model_call
+from shared.json_utils import extract_json_object, clean_json_text, salvage_queries
 
 _log = logging.getLogger("research_planner")
 
 DEFAULT_MAX_QUERIES = 8
-DEFAULT_PLANNER_TIMEOUT_S = 240
 DEFAULT_PLANNER_RETRY_ATTEMPTS = 2
 DEFAULT_PLANNER_RETRY_BACKOFF_S = 4
 
@@ -80,15 +79,6 @@ def _fallback_plan(topic: str, max_queries: int) -> dict:
     }
 
 
-def _planner_timeout_s() -> int:
-    raw = get_feature("research", "planner_timeout_s", DEFAULT_PLANNER_TIMEOUT_S)
-    try:
-        val = int(raw)
-        return val if val > 0 else DEFAULT_PLANNER_TIMEOUT_S
-    except Exception:
-        return DEFAULT_PLANNER_TIMEOUT_S
-
-
 def _planner_retry_attempts() -> int:
     raw = get_feature("research", "planner_retry_attempts", DEFAULT_PLANNER_RETRY_ATTEMPTS)
     try:
@@ -106,124 +96,6 @@ def _planner_retry_backoff_s() -> float:
     except Exception:
         return DEFAULT_PLANNER_RETRY_BACKOFF_S
 
-
-def _strip_fence(raw: str) -> str:
-    s = raw.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = s.rstrip("`").strip()
-    return s
-
-
-def _extract_json_object(raw: str) -> str:
-    s = _strip_fence(raw)
-    start = s.find("{")
-    if start < 0:
-        return ""
-    obj_depth = 0
-    arr_depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            obj_depth += 1
-        elif ch == "}":
-            obj_depth -= 1
-            if obj_depth == 0 and arr_depth == 0:
-                return s[start:i + 1]
-        elif ch == "[":
-            arr_depth += 1
-        elif ch == "]":
-            arr_depth -= 1
-    # truncated — best-effort close
-    tail = s[start:]
-    if in_str:
-        tail += '"'
-    tail = re.sub(r",\s*$", "", tail)
-    tail += "]" * arr_depth
-    tail += "}" * obj_depth
-    return tail
-
-
-def _clean_json_text(s: str) -> str:
-    """Forgiving cleanup for local-model JSON output.
-
-    Local CPU-bound models routinely emit:
-      - trailing commas before } or ]
-      - smart quotes (curly) instead of straight quotes
-      - single-quoted strings instead of double-quoted
-      - unescaped newlines inside strings (we leave alone — handled by parser)
-    This pass catches the easy ones.
-    """
-    if not s:
-        return s
-    # smart quotes → straight
-    s = s.replace("“", '"').replace("”", '"')
-    s = s.replace("‘", "'").replace("’", "'")
-    # trailing commas: ,} or ,]
-    s = re.sub(r",\s*([}\]])", r"\1", s)
-    return s
-
-
-def _salvage_queries(raw: str) -> list[str]:
-    """Last-resort: pull just the queries array out of malformed model output.
-
-    Triggered when full JSON parse fails. Looks for ``"queries"`` followed by
-    a [ ... ] block and extracts the string elements. Even a half-formed
-    response usually has the queries section intact, and queries are the
-    only thing the research agent strictly needs to proceed.
-    """
-    if not raw:
-        return []
-    s = _clean_json_text(_strip_fence(raw))
-    # Find the queries array — try a few common spellings local models produce.
-    for key_re in (r'"queries"\s*:\s*\[', r"'queries'\s*:\s*\[", r"queries\s*:\s*\["):
-        m = re.search(key_re, s, re.IGNORECASE)
-        if not m:
-            continue
-        start = m.end()
-        depth = 1
-        in_str = False
-        escape = False
-        for i in range(start, len(s)):
-            ch = s[i]
-            if in_str:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    inner = s[start:i]
-                    # Pull every quoted string out of the array
-                    items = re.findall(r'"((?:[^"\\]|\\.)*)"', inner)
-                    if not items:
-                        items = re.findall(r"'((?:[^'\\]|\\.)*)'", inner)
-                    return [it.strip() for it in items if it.strip()]
-        # unclosed — try whatever we got so far
-        inner = s[start:]
-        items = re.findall(r'"((?:[^"\\]|\\.)*)"', inner)
-        return [it.strip() for it in items if it.strip()][:20]
-    return []
 
 
 def _as_string_list(value) -> list[str]:
@@ -364,42 +236,27 @@ Example shape (structure only, not content):
   "schema": {{"field_name": "text"}}
 }}"""
 
-    timeout_s = _planner_timeout_s()
     attempts = _planner_retry_attempts()
     backoff_s = _planner_retry_backoff_s()
-    _emit_progress(progress_cb, f"planner configured: attempts={attempts}, timeout={timeout_s}s", step=1, total=4)
-
-    def _run():
-        return model_call("research_planner", prompt)
+    _emit_progress(progress_cb, f"planner configured: attempts={attempts}", step=1, total=4)
 
     last_error = "unknown planner error"
     last_raw = ""
 
     for attempt in range(1, attempts + 1):
         _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: model call", step=2, total=4)
-        ex = _futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="research-plan")
         try:
-            fut = ex.submit(_run)
-            try:
-                result, _ = fut.result(timeout=timeout_s)
-            except _futures.TimeoutError:
-                _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: timeout after {timeout_s}s")
-                last_error = f"planner timeout after {timeout_s}s"
-                _log.warning(
-                    "planner timeout  attempt=%d/%d  topic=%s",
-                    attempt, attempts, topic[:40],
-                )
-                continue
-            except Exception as e:
-                _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: model error")
-                last_error = str(e)[:200]
-                _log.warning(
-                    "plan generation failed  attempt=%d/%d  topic=%s  error=%s",
-                    attempt, attempts, topic[:40], e,
-                )
-                continue
-        finally:
-            ex.shutdown(wait=False)
+            result, _ = model_call("research_planner", prompt)
+        except Exception as e:
+            _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: model error")
+            last_error = str(e)[:200]
+            _log.warning(
+                "plan generation failed  attempt=%d/%d  topic=%s  error=%s",
+                attempt, attempts, topic[:40], e,
+            )
+            if attempt < attempts and backoff_s > 0:
+                time.sleep(backoff_s)
+            continue
 
         if not result:
             _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: empty model response")
@@ -411,10 +268,10 @@ Example shape (structure only, not content):
         else:
             _emit_progress(progress_cb, f"planner attempt {attempt}/{attempts}: validating JSON", step=3, total=4)
             last_raw = result[:500]
-            candidate = _extract_json_object(result)
+            candidate = extract_json_object(result)
             normalized = None
             if candidate:
-                cleaned = _clean_json_text(candidate)
+                cleaned = clean_json_text(candidate)
                 try:
                     parsed = json.loads(cleaned)
                     normalized = _normalize_plan_payload(parsed, max_queries, topic=topic)
@@ -432,7 +289,7 @@ Example shape (structure only, not content):
             if normalized is None or "error" in (normalized or {}):
                 # Salvage: even half-formed model output usually has the
                 # queries array. Pull it, backfill the rest.
-                salvaged_queries = _salvage_queries(result)
+                salvaged_queries = salvage_queries(result)
                 if salvaged_queries:
                     _log.info(
                         "planner: salvaged %d queries from malformed response  topic=%s",
@@ -600,7 +457,7 @@ def run_research_planner_job(plan_id: int, *, queue_agent: bool = True) -> dict:
             "sub_topics": json.dumps(generated.get("sub_topics", [])),
             "queries": json.dumps(queries),
             "schema": json.dumps(generated.get("schema", {})),
-            "status": "generating",
+            "status": "planned",
         })
     except Exception as e:
         _log.warning("plan patch failed  id=%d  error=%s", plan_id, e)
@@ -735,7 +592,7 @@ def reap_stale_plans() -> dict:
         _log.debug("reap: tool_jobs scan skipped", exc_info=True)
 
     reaped = 0
-    for state in ("generating", "searching", "synthesizing"):
+    for state in ("planned", "searching", "synthesizing"):
         try:
             rows = client._get_paginated("research_plans", params={
                 "where": f"(status,eq,{state})",

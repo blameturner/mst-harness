@@ -1,11 +1,21 @@
 import time
 import logging
 import hashlib
+import threading
 from datetime import datetime, timezone
 import requests
 from infra.config import NOCODB_URL, NOCODB_TOKEN, NOCODB_BASE_ID
 
 _log = logging.getLogger("nocodb")
+
+# Module-level session reuses TCP connections across all NocodbClient instances.
+_session = requests.Session()
+_session.headers.update({
+    "xc-token": NOCODB_TOKEN,
+    "Content-Type": "application/json",
+})
+
+_tables_lock = threading.Lock()
 
 PROJECT_MAX_FILES = 5000
 PROJECT_MAX_FILE_BYTES = 100 * 1024
@@ -19,28 +29,28 @@ class ConflictError(Exception):
 
 
 class NocodbClient:
+    _tables_cache: dict | None = None
+
     def __init__(self):
         self.url = f"{NOCODB_URL}/api/v1/db/data/noco/{NOCODB_BASE_ID}"
-        self.headers = {
-            "xc-token": NOCODB_TOKEN,
-            "Content-Type": "application/json"
-        }
-        self.tables = self._load_tables()
+        # Double-checked locking: load tables once per process, not per request.
+        if NocodbClient._tables_cache is None:
+            with _tables_lock:
+                if NocodbClient._tables_cache is None:
+                    NocodbClient._tables_cache = self._load_tables()
+        self.tables = NocodbClient._tables_cache
 
     def _load_tables(self) -> dict:
         for attempt in range(15):
             try:
-                response = requests.get(
+                response = _session.get(
                     f"{NOCODB_URL}/api/v1/db/meta/projects/{NOCODB_BASE_ID}/tables",
-                    headers={"xc-token": NOCODB_TOKEN},
-                    timeout=10
+                    timeout=10,
                 )
                 response.raise_for_status()
                 tables = response.json()["list"]
                 table_map = {table["title"]: table["id"] for table in tables}
-                if not hasattr(NocodbClient, "_tables_logged"):
-                    _log.info("tables loaded  count=%d", len(table_map))
-                    NocodbClient._tables_logged = True
+                _log.info("tables loaded  count=%d", len(table_map))
                 return table_map
             except Exception:
                 _log.warning("not ready, retrying (%d/15)", attempt + 1)
@@ -48,11 +58,10 @@ class NocodbClient:
         raise RuntimeError("Could not connect to Nocodb after 30 seconds")
 
     def _get(self, table: str, params: dict = None) -> dict:
-        response = requests.get(
+        response = _session.get(
             f"{self.url}/{self.tables[table]}",
-            headers=self.headers,
             params=params,
-            timeout=10
+            timeout=10,
         )
         response.raise_for_status()
         return response.json()
@@ -77,11 +86,10 @@ class NocodbClient:
 
     def _post(self, table: str, data: dict) -> dict:
         _log.debug("db write  %s", table)
-        response = requests.post(
+        response = _session.post(
             f"{self.url}/{self.tables[table]}",
-            headers=self.headers,
             json=data,
-            timeout=10
+            timeout=10,
         )
         if response.status_code >= 400:
             _log.error(
@@ -90,16 +98,18 @@ class NocodbClient:
             )
         response.raise_for_status()
         result = response.json()
+        if not isinstance(result, dict):
+            _log.warning("db write %s unexpected response type=%s  body=%s", table, type(result).__name__, str(result)[:200])
+            result = {}
         _log.debug("db write ok  %s id=%s", table, result.get("Id"))
         return result
 
     def _patch(self, table: str, row_id: int, data: dict) -> dict:
         _log.debug("db update  %s/%d", table, row_id)
-        response = requests.patch(
+        response = _session.patch(
             f"{self.url}/{self.tables[table]}/{row_id}",
-            headers=self.headers,
             json=data,
-            timeout=10
+            timeout=10,
         )
         if response.status_code >= 400:
             _log.error(
@@ -107,14 +117,16 @@ class NocodbClient:
                 table, row_id, response.status_code, response.text[:2000], sorted(data.keys()),
             )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if not isinstance(result, dict):
+            return {}
+        return result
 
     def _delete(self, table: str, row_id: int) -> bool:
         """Hard-delete a row by primary key. Returns True on success."""
         _log.debug("db delete  %s/%d", table, row_id)
-        response = requests.delete(
+        response = _session.delete(
             f"{self.url}/{self.tables[table]}/{row_id}",
-            headers=self.headers,
             timeout=10,
         )
         if response.status_code >= 400:
@@ -1121,9 +1133,9 @@ class NocodbClient:
         if "project_bookmarks" not in self.tables:
             return False
         try:
-            requests.delete(
+            _session.delete(
                 f"{self.url}/{self.tables['project_bookmarks']}/{bookmark_id}",
-                headers=self.headers, timeout=10,
+                timeout=10,
             )
             return True
         except Exception:

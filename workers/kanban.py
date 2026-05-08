@@ -196,9 +196,12 @@ async def _execute(db: NocodbClient, task: dict) -> None:
     if isinstance(raw_payload, str):
         import json as _json
         try:
-            task = {**task, "input_payload": _json.loads(raw_payload)}
+            parsed = _json.loads(raw_payload)
+            task = {**task, "input_payload": parsed if isinstance(parsed, dict) else {}}
         except _json.JSONDecodeError:
             task = {**task, "input_payload": {}}
+    elif not isinstance(raw_payload, dict):
+        task = {**task, "input_payload": {}}
 
     if entry is None:
         _log.error("kanban no handler  task_type=%s  row_id=%s", task_type, row_id)
@@ -213,8 +216,13 @@ async def _execute(db: NocodbClient, task: dict) -> None:
 
     try:
         output = await entry.handler(task)
+        if output.get("status") == "failed":
+            _log.warning(
+                "kanban handler returned failed  row_id=%s  task_type=%s  error=%s",
+                row_id, task_type, output.get("error", "")[:200],
+            )
         await asyncio.to_thread(_mark_done, db, row_id, output)
-        _log.info("kanban done  row_id=%s  task_type=%s", row_id, task_type)
+        _log.info("kanban done  row_id=%s  task_type=%s  status=%s", row_id, task_type, output.get("status", "?"))
     except Exception as exc:
         if isinstance(exc, TaskNotReady):
             not_before = _iso_future(exc.delay_seconds)

@@ -2,7 +2,8 @@
 
 Each public function maps to one logical step:
   generate_curriculum_modules  →  list[dict] (module array)
-  generate_lesson              →  (lesson_markdown, session_summary, anki_cards, checks)
+  generate_lesson              →  lesson_markdown (str)
+  generate_lesson_meta         →  (session_summary, anki_cards, checks)
   generate_revision            →  (lesson_markdown, session_summary, anki_cards, checks)
   generate_checks              →  list[dict]
 
@@ -13,9 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 from shared.models import model_call
+from shared.json_utils import parse_json_object, salvage_list
 
 _log = logging.getLogger("teaching.llm")
 
@@ -58,13 +59,13 @@ def generate_curriculum_modules(
         if not text:
             continue
         try:
-            parsed = _parse_json_object(text)
+            parsed = parse_json_object(text)
             modules = parsed.get("modules") or []
             if isinstance(modules, list) and modules:
                 return modules
         except (ValueError, json.JSONDecodeError):
             _log.warning("teaching_curriculum parse failed (attempt %d/2), trying salvage", attempt + 1)
-        modules = _salvage_list(text, "modules")
+        modules = salvage_list(text, "modules")
         if modules:
             return modules
     raise RuntimeError("teaching_curriculum LLM failed to return modules after 2 attempts")
@@ -77,7 +78,7 @@ def generate_lesson(
     learner_level: str,
     known_concepts: list[dict],
     research_text: str,
-) -> tuple[str, str, str, list[dict]]:
+) -> str:
     known = ", ".join(c.get("concept", "") for c in known_concepts[:20]) or "none"
     obj_text = "\n".join(f"- {o}" for o in objectives)
     lesson_prompt = (
@@ -92,9 +93,7 @@ def generate_lesson(
     lesson_markdown, _ = model_call("teaching_lesson", lesson_prompt)
     if not lesson_markdown:
         raise RuntimeError("teaching_lesson LLM call returned empty text")
-
-    session_summary, anki_cards, checks = _generate_lesson_meta(lesson_markdown)
-    return lesson_markdown, session_summary, anki_cards, checks
+    return lesson_markdown
 
 
 def generate_revision(
@@ -116,7 +115,7 @@ def generate_revision(
     if not revised_markdown:
         raise RuntimeError("teaching_revision LLM call returned empty text")
 
-    session_summary, anki_cards, checks = _generate_lesson_meta(revised_markdown)
+    session_summary, anki_cards, checks = generate_lesson_meta(revised_markdown)
     return revised_markdown, session_summary, anki_cards, checks
 
 
@@ -140,13 +139,13 @@ def generate_checks(
         if not text:
             continue
         try:
-            parsed = _parse_json_object(text)
+            parsed = parse_json_object(text)
             checks = parsed.get("checks") or []
             if isinstance(checks, list) and checks:
                 return checks
         except (ValueError, json.JSONDecodeError):
             _log.warning("teaching_check parse failed (attempt %d/2), trying salvage", attempt + 1)
-        checks = _salvage_list(text, "checks")
+        checks = salvage_list(text, "checks")
         if checks:
             return checks
     raise RuntimeError("teaching_check LLM failed to return checks after 2 attempts")
@@ -154,7 +153,7 @@ def generate_checks(
 
 # ── internal helpers ─────────────────────────────────────────────────────────
 
-def _generate_lesson_meta(lesson_markdown: str) -> tuple[str, str, list[dict]]:
+def generate_lesson_meta(lesson_markdown: str) -> tuple[str, str, list[dict]]:
     """Second LLM pass: extract structured metadata from the prose lesson."""
     prompt = (
         f'Given this lesson:\n{lesson_markdown[:8000]}\n\n'
@@ -169,7 +168,7 @@ def _generate_lesson_meta(lesson_markdown: str) -> tuple[str, str, list[dict]]:
         _log.warning("teaching_lesson_meta returned empty — using fallback metadata")
         return "", "", []
     try:
-        parsed = _parse_json_object(text)
+        parsed = parse_json_object(text)
         session_summary = str(parsed.get("session_summary") or "")
         anki_cards = str(parsed.get("anki_cards") or "")
         checks = parsed.get("checks") or []
@@ -181,73 +180,3 @@ def _generate_lesson_meta(lesson_markdown: str) -> tuple[str, str, list[dict]]:
         return "", "", []
 
 
-def _salvage_list(raw: str, key: str) -> list:
-    """Extract a named JSON array from malformed model output."""
-    s = _strip_fence(raw)
-    s = s.replace("“", '"').replace("”", '"')
-    s = re.sub(r",\s*([}\]])", r"\1", s)
-    m = re.search(rf'"{key}"\s*:\s*\[', s, re.IGNORECASE)
-    if not m:
-        return []
-    start = m.end()  # right after the opening [
-    depth = 1
-    in_str = False
-    escape = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(s[start - 1:i + 1])
-                except json.JSONDecodeError:
-                    return []
-    return []
-
-
-def _strip_fence(raw: str) -> str:
-    s = raw.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = s.rstrip("`").strip()
-    return s
-
-
-def _parse_json_object(raw: str) -> dict:
-    s = _strip_fence(raw)
-    s = s.replace(""", '"').replace(""", '"')
-    s = re.sub(r",\s*([}\]])", r"\1", s)
-    start = s.find("{")
-    if start < 0:
-        raise ValueError("no JSON object found in LLM output")
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            escape = not escape and ch == "\\"
-            if not escape and ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return json.loads(s[start:i + 1])
-    raise ValueError("unbalanced JSON object in LLM output")

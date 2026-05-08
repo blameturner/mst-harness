@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from infra.config import MODELS, refresh_models
+from infra.settings import get_openrouter_connection
 from workers.chat.config import CHAT_DEFAULT_STYLE, list_chat_styles
 from workers.code.config import CODE_DEFAULT_MODE, CODE_DEFAULT_STYLE, list_code_modes, list_code_styles
 
@@ -44,6 +45,15 @@ def list_models():
             "model_id": entry.get("model_id"),
             "url": entry.get("url"),
         })
+    conn = get_openrouter_connection()
+    if conn:
+        for model_id in (conn.get("allowed_models") or []):
+            models.append({
+                "name": f"openrouter:{model_id}",
+                "role": "openrouter",
+                "model_id": model_id,
+                "url": None,
+            })
     return {"models": models}
 
 

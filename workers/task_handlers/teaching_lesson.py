@@ -25,7 +25,7 @@ from workers.kanban import TaskHandler, TaskNotReady
 _log = logging.getLogger("teaching.lesson")
 
 # Plan statuses that mean "not done yet — check back later"
-_RESEARCH_IN_PROGRESS = frozenset({"pending", "generating", "searching", "synthesizing", "queued"})
+_RESEARCH_IN_PROGRESS = frozenset({"pending", "planned", "searching", "synthesizing", "queued"})
 
 
 async def handle(task: dict) -> dict:
@@ -121,7 +121,7 @@ def _lesson_phase(task_id: int, payload: dict) -> dict:
             get_curriculum, get_learner_concepts,
             create_lesson_row, advance_curriculum_module, upsert_learner_concept,
         )
-        from tools.teaching.llm import generate_lesson
+        from tools.teaching.llm import generate_lesson, generate_lesson_meta
         from tools.teaching.output import write_lesson_files
 
         db = NocodbClient()
@@ -157,7 +157,7 @@ def _lesson_phase(task_id: int, payload: dict) -> dict:
         known_concepts = get_learner_concepts(db, org_id, topic)
         research_text = (plan.get("paper_content") or "").strip()
 
-        lesson_markdown, session_summary, anki_cards, checks = generate_lesson(
+        lesson_markdown = generate_lesson(
             topic=topic,
             module_title=module_title,
             objectives=objectives,
@@ -165,6 +165,14 @@ def _lesson_phase(task_id: int, payload: dict) -> dict:
             known_concepts=known_concepts,
             research_text=research_text,
         )
+
+        session_summary, anki_cards, checks = generate_lesson_meta(lesson_markdown)
+        checks_status = "ok" if checks else "unavailable"
+        if not checks:
+            _log.warning(
+                "teaching_lesson meta returned no checks  org=%d topic=%r module=%s",
+                org_id, topic, module_id,
+            )
 
         lesson_path, cards_path = write_lesson_files(task_id, lesson_markdown, anki_cards)
         lesson_row = create_lesson_row(
@@ -187,6 +195,7 @@ def _lesson_phase(task_id: int, payload: dict) -> dict:
             "session_summary": session_summary,
             "anki_cards": anki_cards,
             "checks": checks,
+            "checks_status": checks_status,
             "sources": [],
             "lesson_path": lesson_path,
             "cards_path": cards_path,

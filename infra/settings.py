@@ -130,7 +130,7 @@ def get_all_settings() -> dict:
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
             if agent == SYSTEM_AGENT:
                 system = data
-            elif agent not in (CONFIG_AGENT, OPENROUTER_AGENT):
+            elif agent not in (CONFIG_AGENT, OPENROUTER_AGENT, GITEA_AGENT):
                 agents[agent] = data
         return {"agents": agents, "system": system}
     except Exception:
@@ -215,3 +215,40 @@ def mark_openrouter_verified() -> None:
     data["verified_at"] = datetime.now(timezone.utc).isoformat()
     _write_row(OPENROUTER_AGENT, data)
     _invalidate(OPENROUTER_AGENT)
+
+
+# ── Gitea connection (global default) ─────────────────────────────────────────
+
+GITEA_AGENT = "__gitea__"
+
+
+def get_gitea_default() -> dict | None:
+    """Return stored global Gitea config, or None if no token is set."""
+    data = _cached(GITEA_AGENT)
+    return data if data.get("token") else None
+
+
+def upsert_gitea_default(base_url: str, token: str, username: str = "") -> dict:
+    existing = dict(_cached(GITEA_AGENT))
+    data: dict = {**existing, "base_url": base_url, "token": token, "username": username}
+    _write_row(GITEA_AGENT, data)
+    _invalidate(GITEA_AGENT)
+    return data
+
+
+def delete_gitea_default() -> bool:
+    data = _cached(GITEA_AGENT)
+    if not data.get("token"):
+        return False
+    _write_row(GITEA_AGENT, {})
+    _invalidate(GITEA_AGENT)
+    return True
+
+
+def mark_gitea_verified() -> None:
+    data = dict(_cached(GITEA_AGENT))
+    if not data:
+        return
+    data["verified_at"] = datetime.now(timezone.utc).isoformat()
+    _write_row(GITEA_AGENT, data)
+    _invalidate(GITEA_AGENT)

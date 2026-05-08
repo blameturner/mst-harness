@@ -991,6 +991,16 @@ def run_research_agent(plan_id: int) -> dict:
             "research_agent: plan loaded  plan_id=%d  queries=%d  sub_topics=%d  doc_type=%s",
             plan_id, len(queries), len(sub_topics), doc_type,
         )
+
+        probe, _ = model_call("research_agent_probe", "ping")
+        if not probe:
+            _log.error("research_agent: model unavailable  plan_id=%d", plan_id)
+            client._patch("research_plans", plan_id, {
+                "status": "failed",
+                "error_message": "model unavailable at agent start",
+            })
+            return {"status": "failed", "plan_id": plan_id, "error": "model unavailable"}
+
         _patch_or_log(client, plan_id, {"status": "searching"}, "searching")
         _log.info("research_agent: searching  plan_id=%d  queries=%d", plan_id, len(queries))
 

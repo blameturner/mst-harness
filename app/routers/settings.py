@@ -206,13 +206,15 @@ async def list_openrouter_models():
             )
             r.raise_for_status()
             data = r.json().get("data") or []
-            models = [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+            models = [
+                {"id": m["id"], "is_free": m.get("pricing", {}).get("prompt") == "0"}
+                for m in data if isinstance(m, dict) and m.get("id")
+            ]
             _log.info("openrouter models listed  count=%d  allowed=%d", len(models), len(allowed))
             return {"models": models, "allowed": allowed, "enabled": True}
     except Exception as exc:
         _log.warning("openrouter models fetch failed  err=%s", exc)
-        fallback: list[str] = []
-        return {"models": fallback, "allowed": allowed, "enabled": True, "fallback": True}
+        return {"models": [], "allowed": allowed, "enabled": True, "fallback": True}
 
 
 class OpenRouterAllowlistPayload(BaseModel):
@@ -249,4 +251,74 @@ async def test_openrouter_connection():
         return {"ok": False, "error": str(exc), "status": exc.response.status_code}
     except Exception as exc:
         _log.warning("openrouter connection test failed  err=%s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Gitea connection ──────────────────────────────────────────────────────────
+
+
+class GiteaConnectionPayload(BaseModel):
+    base_url: str
+    token: str
+    username: str = ""
+
+
+def _redact_gitea(conn: dict | None) -> dict | None:
+    if not conn:
+        return None
+    out = dict(conn)
+    if out.get("token"):
+        out["token"] = "***"
+    return out
+
+
+@router.get("/connections/gitea")
+def get_gitea_connection():
+    return {"connection": _redact_gitea(_settings.get_gitea_default())}
+
+
+@router.put("/connections/gitea")
+def upsert_gitea_connection(body: GiteaConnectionPayload):
+    from infra.gitea_client import GiteaClient, GiteaError
+
+    conn = _settings.upsert_gitea_default(body.base_url, body.token, body.username)
+    verified = False
+    try:
+        g = GiteaClient(base_url=body.base_url, token=body.token, username=body.username)
+        g.verify_credentials()
+        _settings.mark_gitea_verified()
+        verified = True
+        _log.info("gitea connection saved  base_url=%s  verified=true", body.base_url)
+    except (GiteaError, Exception) as exc:
+        _log.warning("gitea verify failed  base_url=%s  err=%s", body.base_url, exc)
+    return {"connection": _redact_gitea(conn), "verified": verified}
+
+
+@router.delete("/connections/gitea")
+def delete_gitea_connection():
+    ok = _settings.delete_gitea_default()
+    if ok:
+        _log.info("gitea connection deleted")
+    return {"ok": ok}
+
+
+@router.post("/connections/gitea/test")
+def test_gitea_connection():
+    from infra.gitea_client import GiteaClient, GiteaError
+
+    conn = _settings.get_gitea_default()
+    if not conn or not conn.get("token"):
+        raise HTTPException(400, "gitea not configured")
+    try:
+        g = GiteaClient(
+            base_url=conn.get("base_url") or "",
+            token=conn["token"],
+            username=conn.get("username") or "",
+        )
+        info = g.verify_credentials()
+        _settings.mark_gitea_verified()
+        _log.info("gitea connection tested  ok=true  login=%s", info.get("login"))
+        return {"ok": True, **info}
+    except (GiteaError, Exception) as exc:
+        _log.warning("gitea connection test failed  err=%s", exc)
         return {"ok": False, "error": str(exc)}

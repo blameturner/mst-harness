@@ -210,23 +210,38 @@ def _get_gitea_client(db, project_id: int):
         return None
     org_id = int(project.get("org_id") or 0)
     rows = db._safe_list("gitea_connections", f"(org_id,eq,{org_id})", limit=1)
-    if not rows:
-        return None
-    conn = rows[0]
-    return GiteaClient(
-        base_url=str(conn.get("base_url") or ""),
-        token=str(conn.get("access_token") or ""),
-        username=str(conn.get("username") or ""),
-    )
+    if rows:
+        conn = rows[0]
+        return GiteaClient(
+            base_url=str(conn.get("base_url") or ""),
+            token=str(conn.get("access_token") or ""),
+            username=str(conn.get("username") or ""),
+        )
+    # Fall back to the global default token configured in settings.
+    from infra.settings import get_gitea_default
+    default = get_gitea_default()
+    if default:
+        return GiteaClient(
+            base_url=str(default.get("base_url") or ""),
+            token=str(default.get("token") or ""),
+            username=str(default.get("username") or ""),
+        )
+    return None
 
 
 def _get_repo_coords(db, project_id: int) -> tuple[str, str]:
     """Return (owner, repo_name) from the project's gitea_origin field."""
+    import re
     project = db.get_project(project_id)
+    if not project:
+        return "", ""
     origin = str(project.get("gitea_origin") or "")
+    m = re.match(r"^([^/]+)/([^@]+)@", origin)
+    if m:
+        return m.group(1), m.group(2)
     if "/" in origin:
-        parts = origin.rstrip("/").split("/")
-        return parts[-2], parts[-1]
+        owner, _, rest = origin.partition("/")
+        return owner, rest
     return "", origin
 
 
